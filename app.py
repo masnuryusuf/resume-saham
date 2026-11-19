@@ -29,7 +29,7 @@ import yfinance as yf
 # ---------------------------------------------------------------------------
 PEER_GROUPS: dict[str, list[str]] = {
     "Perbankan": ["BBCA", "BBRI", "BMRI", "BBNI", "BRIS", "BNGA", "BBTN"],
-    "Telekomunikasi": ["TLKM", "ISAT", "EXCL", "MTEL", "TOWR"],
+    "Telekomunikasi": ["TLKM", "ISAT", "EXCL", "MTEL", "TOWR","KLBF","TRON"],
     "Konsumer": ["UNVR", "ICBP", "INDF", "MYOR", "CPIN", "JPFA", "SIDO"],
     "Farmasi & Kesehatan": ["KLBF", "SIDO", "MIKA", "HEAL", "SILO"],
     "Batu Bara": ["PTBA", "ITMG", "AADI", "ADRO", "INDY", "BUMI"],
