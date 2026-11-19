@@ -1,122 +1,58 @@
-# Resume Saham
+# 📈 Resume Saham
 
-Aplikasi sederhana untuk belajar menganalisis saham. Untuk setiap kode saham, aplikasi membuat laporan HTML yang berisi:
+Aplikasi sederhana untuk meringkas satu saham dan membandingkannya dengan saham sejenis:
 
-1. **Fundamental**: EPS, PER, PBV, ROE, NPM, DER, pertumbuhan laba dan pendapatan, serta current ratio.
-2. **Dividen**: dividend yield 12 bulan, yield rata-rata 5 tahun, payout ratio, dan konsistensi pembagian dividen.
-3. **Tren**: MA20, MA50, MA200, RSI, golden/death cross, return 1/3/6 bulan, 1 tahun, YTD, return bulanan (12 bulan), dan return tahunan (5 tahun).
-4. **Rekomendasi BELI / TAHAN / JUAL** dari skor 0–100, beserta alasannya (✓ / ✕).
-5. **Pembanding sejenis**: saham satu sektor diberi tanda **★ lebih baik** jika skornya lebih tinggi.
-
-Setiap angka punya penjelasan singkat di sebelahnya (misalnya "murah", "sehat", atau "overbought"). Setiap istilah juga diberi nomor catatan kaki yang mengarah ke kamus istilah di bagian bawah laporan.
-
----
-
-## 1. Pemasangan (sekali saja, di Mac)
-
-Buka **Terminal**, lalu jalankan:
-
-```bash
-python3 --version          # kalau belum ada, Mac akan menawarkan untuk memasangnya
-pip3 install yfinance pandas
-```
-
-Simpan `resume_saham.py` dan `README.md` dalam satu folder, misalnya `~/Documents/resume-saham`.
-
-## 2. Menjalankan
-
-```bash
-cd ~/Documents/resume-saham
-
-python3 resume_saham.py BBCA TLKM ADRO     # analisis saham tertentu
-python3 resume_saham.py                    # pakai daftar di watchlist.txt
-python3 resume_saham.py --demo             # coba tanpa internet (data karangan)
-```
-
-* Kode saham Indonesia cukup ditulis `BBCA` karena akhiran `.JK` ditambahkan otomatis.
-* Untuk saham AS, beri titik di depan kodenya: `.AAPL`, `.MSFT`.
-* Laporan langsung terbuka di browser dan tersimpan di folder `hasil/`.
-
-### Opsi yang berguna
-
-| Opsi | Fungsi |
+| Bagian | Isi |
 |---|---|
-| `--pembanding BBRI,BMRI` | Memilih sendiri saham pembanding |
-| `--tanpa-pembanding` | Melewati perbandingan agar lebih cepat |
-| `--bandingkan 2026-10-01` | Membandingkan dengan resume pada tanggal tertentu |
-| `--jangan-buka` | Tidak membuka browser otomatis |
+| **Fundamental** | ROE, ROA, margin laba bersih, pertumbuhan pendapatan & laba, DER, current ratio (DER & current ratio otomatis diabaikan untuk bank) |
+| **Valuasi** | PER, PBV |
+| **Dividen** | Dividend yield 12 bulan, dividen per saham, payout ratio, konsistensi 5 tahun, CAGR dividen, grafik dividen per tahun |
+| **Tren** | Tahunan (return 1/3 tahun, YTD, posisi vs MA200, rentang 52 minggu) dan bulanan (return 1/3/6 bulan, MA20 vs MA50, RSI 14), grafik candlestick + MA, return per tahun & per bulan |
+| **Rekomendasi** | Skor 0–100 → **BELI** (≥65), **TAHAN** (45–64), **JUAL** (<45), lengkap dengan daftar kekuatan & hal yang perlu diperhatikan |
+| **Perbandingan** | Tabel peer, "alternatif yang lebih baik", juara per kategori, grafik kinerja relatif 1 tahun |
 
-## 3. Cara UPDATE dari resume sebelumnya
+## Cara menjalankan
 
-Cukup **jalankan perintah yang sama lagi** (misalnya seminggu sekali):
+1. Pasang Python 3.10 atau lebih baru (python.org).
+2. Buka Terminal / Command Prompt di folder ini, lalu jalankan:
+   ```
+   pip install -r requirements.txt
+   streamlit run app.py
+   ```
+3. Browser akan terbuka otomatis di `http://localhost:8501`.
+4. Ketik kode saham (mis. `BBCA`, `TLKM`, `ASII`), lalu klik **Analisis**.
+   Untuk saham luar negeri (mis. `AAPL`), hilangkan centang "Saham BEI".
 
-```bash
-python3 resume_saham.py
-```
+## Fitur belajar
 
-Setiap kali dijalankan, aplikasi melakukan hal berikut:
+Aktifkan **🎓 Mode belajar** di panel kiri (sudah menyala sejak awal). Fitur yang tersedia:
 
-1. Mengambil data terbaru.
-2. Mencari snapshot terakhir di `hasil/` (`snapshot_YYYY-MM-DD.json`) yang tanggalnya lebih awal dari hari ini.
-3. Menampilkan perubahannya di laporan:
-   * Kolom **Perubahan** di tabel ringkasan, misalnya `+19,7% · skor +19 · TAHAN→BELI`.
-   * Kotak **"Sejak resume sebelumnya"** di setiap kartu saham.
-4. Menyimpan snapshot baru dan menambah baris di `hasil/riwayat.csv`.
-
-Isi folder `hasil/`:
-
-| File | Isi |
+| Fitur | Letak |
 |---|---|
-| `resume_YYYY-MM-DD.html` | Laporan per tanggal (arsip) |
-| `resume_terbaru.html` | Laporan terakhir (selalu ditimpa) |
-| `snapshot_YYYY-MM-DD.json` | Data ringkas untuk perbandingan |
-| `riwayat.csv` | Sejarah harga, skor, dan rekomendasi. Bisa dibuka di Numbers atau Excel untuk melihat perkembangan dari waktu ke waktu |
+| **Ikon ⓘ** di samping angka dan judul kolom | Arahkan kursor (Mac) atau ketuk (iPad) untuk melihat kepanjangan singkatan, artinya, dan patokannya |
+| Kolom **Penilaian** (👍 / 😐 / 👎) dan **Artinya** | Tabel rasio di tab Fundamental |
+| **📘 Catatan kaki** bernomor | Di bawah ringkasan dan di setiap tab: daftar istilah yang dipakai di bagian itu |
+| **📘 Cari arti istilah** | Panel kiri: pilih istilah, mis. PER atau RSI, untuk melihat penjelasannya |
+| **📘 Kamus lengkap** | Paling bawah halaman: semua istilah dan singkatan dalam satu tabel |
+| **Contoh hitungan dividen** | Tab Dividen: berapa dividen yang Anda terima dari 1 lot |
 
-Jika Anda menjalankannya beberapa kali di hari yang sama, hasil hari itu ditimpa dan tidak tercatat dobel.
+### Panduan grafik candle (tab 📊 Tren)
 
-Untuk membandingkan dengan tanggal tertentu, bukan yang terakhir:
+Panduan ini ada tepat di bawah grafik candle:
 
-```bash
-python3 resume_saham.py --bandingkan 2026-09-01
-```
+- **🕯️ Cara membaca grafik candle**: gambar anatomi candle naik dan turun beserta label Open, High, Low, Close, badan, dan sumbu. Ada juga contoh pola umum (Doji, Hammer, Shooting star, Marubozu, Engulfing), cara membaca candle bersama garis MA, dan langkah praktis membaca grafik.
+- **🔎 Bacaan otomatis candle terakhir**: aplikasi menjelaskan candle hari terakhir saham yang dianalisis dengan bahasa sederhana. Isinya: warna candle, rentang harga, pola yang terdeteksi, dan posisi harga terhadap MA20, MA50, dan MA200.
 
-### (Opsional) Update otomatis setiap Senin pukul 08.00
+Isi kamus bisa ditambah atau diubah di `GLOSARIUM` dalam `app.py`.
 
-```bash
-crontab -e
-```
+## Cara skor dihitung
 
-Tambahkan baris berikut (ganti path sesuai folder Anda):
+Skor total = Fundamental 35% + Valuasi 20% + Dividen 15% + Tren 30%.
+Setiap rasio diubah menjadi skor 0–100 secara linier terhadap patokan umum (mis. ROE 5% → 0, ROE 20% → 100).
+Patokan dan bobot bisa diubah di fungsi `analyze()` dalam `app.py`. Kelompok saham pembanding bisa diubah di `PEER_GROUPS`.
 
-```
-0 8 * * 1 cd ~/Documents/resume-saham && /usr/bin/python3 resume_saham.py --jangan-buka
-```
+## Catatan penting
 
-## 4. Melihat di iPad
-
-Laporan berupa satu file HTML tanpa internet atau library luar. Simpan folder aplikasi di **iCloud Drive**, lalu buka `hasil/resume_terbaru.html` dari aplikasi **Files** di iPad. Ketuk grafik harga untuk melihat nilai harga dan MA pada tanggal tersebut. Script tetap dijalankan dari Mac.
-
-## 5. Menyesuaikan
-
-Bagian-bagian ini ada di dalam `resume_saham.py`:
-
-* **`watchlist.txt`**: daftar saham yang dipantau, satu kode per baris.
-* **`KELOMPOK`**: grup saham sejenis untuk pembanding. Tambah sektor atau kode sesuai kebutuhan.
-* **`beri_skor()`**: semua aturan skor. Misalnya, jika menurut Anda PER ≤ 15 sudah murah, ubah batasnya di sini.
-* **`ISTILAH`**: isi kamus istilah dan catatan kaki.
-
-### Cara skor dihitung
-
-| Bagian | Bobot | Dasar penilaian |
-|---|---|---|
-| Fundamental | 50% | ROE, NPM, DER (tidak dinilai untuk bank), PER, PBV, pertumbuhan laba |
-| Dividen | 20% | Dividend yield × faktor konsistensi 5 tahun, dikurangi jika payout > 100% |
-| Tren | 30% | Posisi harga terhadap MA20/50/200, MA50 vs MA200, RSI, return 1 tahun |
-
-Rekomendasi: **BELI** jika total ≥ 65, **TAHAN** jika 45–64, **JUAL** jika < 45.
-
-## 6. Catatan penting
-
-* Data berasal dari Yahoo Finance (gratis dan tidak resmi). Untuk saham Indonesia, beberapa angka fundamental kadang kosong atau terlambat. Cek silang dengan laporan keuangan di idx.co.id.
-* Dividend yield dihitung dari riwayat dividen yang benar-benar dibayar, sehingga lebih bisa diandalkan daripada angka yield bawaan.
-* Rekomendasi berasal dari aturan sederhana untuk belajar, **bukan nasihat investasi**.
+- Data diambil dari Yahoo Finance (gratis, tertunda ±15 menit). Untuk saham BEI, beberapa rasio kadang kosong atau terlambat diperbarui. Cek ulang dengan laporan keuangan resmi di idx.co.id.
+- Data disimpan sementara 1 jam agar aplikasi cepat dan tidak membebani Yahoo.
+- Rekomendasi dihasilkan otomatis dari aturan sederhana dan **bukan nasihat investasi**.

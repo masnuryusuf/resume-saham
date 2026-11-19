@@ -1,936 +1,1120 @@
-#!/usr/bin/env python3
-# -*- coding: utf-8 -*-
 """
-RESUME SAHAM — aplikasi sederhana untuk belajar menganalisis saham.
+Resume Saham — aplikasi sederhana untuk meringkas saham berdasarkan:
+  1. Kekuatan fundamental keuangan
+  2. Imbal hasil dividen
+  3. Tren harga tahunan & bulanan
+  4. Rekomendasi BELI / TAHAN / JUAL
+  5. Perbandingan dengan saham sejenis (peer)
 
-Apa yang dilakukan:
-  1. Mengambil data harga, dividen, dan laporan keuangan ringkas dari Yahoo Finance.
-  2. Menilai tiga hal: kekuatan fundamental, imbal hasil dividen, dan tren harga.
-  3. Memberi rekomendasi BELI / TAHAN / JUAL (berbasis aturan sederhana, untuk belajar).
-  4. Membandingkan dengan saham sejenis (satu sektor) dan menandai yang lebih baik.
-  5. Menyimpan hasil (snapshot) supaya saat dijalankan lagi, terlihat apa yang berubah.
+Data: Yahoo Finance (via library yfinance). Saham BEI memakai akhiran .JK (mis. BBCA.JK).
+Jalankan:  streamlit run app.py
 
-Cara pakai singkat (lihat README.md untuk lengkapnya):
-  python3 resume_saham.py BBCA TLKM ADRO        # analisis saham tertentu
-  python3 resume_saham.py                       # pakai daftar di watchlist.txt
-  python3 resume_saham.py --demo                # coba tanpa internet (data karangan)
-
-Kode saham Indonesia otomatis diberi akhiran .JK (BBCA -> BBCA.JK).
-Saham luar negeri tulis apa adanya dengan titik di depan, mis. .AAPL -> AAPL.
-
-PENTING: ini alat belajar, bukan nasihat investasi.
+Catatan: skor & rekomendasi dihitung dengan aturan sederhana (rule-based),
+BUKAN nasihat investasi. Selalu lakukan riset sendiri.
 """
 
 from __future__ import annotations
 
-import argparse
-import csv
-import datetime as dt
-import html
-import json
 import math
-import random
-import sys
-import webbrowser
-from pathlib import Path
+from datetime import datetime, timedelta
 
-try:
-    import pandas as pd
-except ImportError:  # pragma: no cover
-    sys.exit("Butuh pandas. Jalankan:  pip3 install pandas yfinance")
-
-FOLDER_APP = Path(__file__).resolve().parent
-FOLDER_HASIL = FOLDER_APP / "hasil"
-FILE_WATCHLIST = FOLDER_APP / "watchlist.txt"
+import numpy as np
+import pandas as pd
+import plotly.graph_objects as go
+import streamlit as st
+import yfinance as yf
 
 # ---------------------------------------------------------------------------
-# 1. KAMUS ISTILAH — dipakai untuk catatan kaki & penjelasan di laporan
+# Daftar saham sejenis (peer) BEI. Silakan tambah/ubah sesuai kebutuhan.
 # ---------------------------------------------------------------------------
-ISTILAH = {
-    "Harga": "Harga penutupan terakhir di bursa.",
-    "Kapitalisasi": "Market cap = harga saham × jumlah saham beredar. Menggambarkan ukuran perusahaan.",
-    "EPS": "Earning Per Share — laba bersih dibagi jumlah saham. Berapa rupiah laba yang 'dimiliki' tiap lembar saham. Makin besar & makin naik tiap tahun, makin baik.",
-    "PER": "Price to Earnings Ratio — harga ÷ EPS. Berapa tahun laba yang Anda 'bayar' saat membeli. PER rendah = relatif murah, tapi bandingkan dengan saham satu sektor. PER negatif = perusahaan rugi.",
-    "PBV": "Price to Book Value — harga ÷ nilai buku (ekuitas) per saham. PBV < 1 berarti harga di bawah nilai bukunya. Bank bagus wajar punya PBV tinggi karena ROE-nya tinggi.",
-    "ROE": "Return on Equity — laba bersih ÷ ekuitas. Seberapa efisien perusahaan menghasilkan laba dari modal pemegang saham. >15% tergolong bagus.",
-    "NPM": "Net Profit Margin — laba bersih ÷ pendapatan. Dari tiap Rp100 penjualan, berapa yang tersisa menjadi laba.",
-    "DER": "Debt to Equity Ratio — total utang ÷ ekuitas. Mengukur beban utang. <1 umumnya sehat. Untuk bank/keuangan DER memang tinggi (dana nasabah dihitung utang), jadi tidak dinilai.",
-    "Pertumbuhan Laba": "Perubahan laba dibanding periode yang sama tahun lalu (year-on-year).",
-    "Pertumbuhan Pendapatan": "Perubahan pendapatan/penjualan dibanding periode yang sama tahun lalu.",
-    "Current Ratio": "Aset lancar ÷ utang lancar. Kemampuan membayar kewajiban jangka pendek. >1 berarti aset lancar cukup menutup utang lancar.",
-    "Dividend Yield": "Total dividen 12 bulan terakhir ÷ harga sekarang. 'Bunga' tahunan dari memegang saham. Bandingkan dengan bunga deposito (~4–5%).",
-    "Yield Rata-rata 5 Th": "Rata-rata dividen per tahun dalam 5 tahun terakhir ÷ harga sekarang. Lebih stabil daripada yield 1 tahun.",
-    "Payout Ratio": "Porsi laba yang dibagikan sebagai dividen. 30–70% wajar. >100% artinya membagi lebih dari labanya — sulit dipertahankan.",
-    "Konsistensi Dividen": "Berapa tahun dari 5 tahun terakhir perusahaan membagi dividen.",
-    "MA20": "Moving Average 20 hari — rata-rata harga 20 hari bursa (~1 bulan). Tren jangka pendek.",
-    "MA50": "Moving Average 50 hari (~2,5 bulan). Tren jangka menengah.",
-    "MA200": "Moving Average 200 hari (~1 tahun). Tren jangka panjang. Harga di atas MA200 = tren besar naik.",
-    "Golden Cross": "MA50 memotong ke atas MA200 — sinyal awal tren naik jangka panjang.",
-    "Death Cross": "MA50 memotong ke bawah MA200 — sinyal awal tren turun jangka panjang.",
-    "RSI": "Relative Strength Index (14 hari), skala 0–100. >70 = 'overbought' (sudah naik terlalu cepat, rawan koreksi). <30 = 'oversold' (sudah turun terlalu dalam, bisa memantul).",
-    "Return": "Persentase perubahan harga dalam periode tertentu (belum termasuk dividen).",
-    "YTD": "Year to Date — perubahan sejak awal tahun berjalan sampai hari ini.",
-    "Skor": "Nilai 0–100 hasil aturan sederhana aplikasi ini. Total = 50% fundamental + 20% dividen + 30% tren.",
-    "Rekomendasi": "BELI jika skor total ≥ 65, TAHAN jika 45–64, JUAL jika < 45. Hanya untuk belajar, bukan nasihat investasi.",
+PEER_GROUPS: dict[str, list[str]] = {
+    "Perbankan": ["BBCA", "BBRI", "BMRI", "BBNI", "BRIS", "BNGA", "BBTN"],
+    "Telekomunikasi": ["TLKM", "ISAT", "EXCL", "MTEL", "TOWR"],
+    "Konsumer": ["UNVR", "ICBP", "INDF", "MYOR", "CPIN", "JPFA", "SIDO"],
+    "Farmasi & Kesehatan": ["KLBF", "SIDO", "MIKA", "HEAL", "SILO"],
+    "Batu Bara": ["PTBA", "ITMG", "AADI", "ADRO", "INDY", "BUMI"],
+    "Logam & Nikel": ["ANTM", "INCO", "MDKA", "NCKL", "TINS", "MBMA"],
+    "Otomotif & Konglomerasi": ["ASII", "UNTR", "AUTO", "DRMA"],
+    "Semen & Konstruksi": ["SMGR", "INTP", "WIKA", "PTPP", "ADHI"],
+    "Energi & Migas": ["PGAS", "MEDC", "AKRA", "ELSA", "PGEO"],
+    "Ritel": ["AMRT", "MIDI", "MAPI", "ACES", "ERAA"],
+    "Properti": ["BSDE", "CTRA", "PWON", "SMRA", "PANI"],
+    "Teknologi": ["GOTO", "BUKA", "EMTK", "DCII"],
+    "Perkebunan (CPO)": ["AALI", "LSIP", "SSMS", "DSNG", "TAPG"],
 }
 
+FINANCIAL_SECTORS = {"Financial Services", "Banks", "Financial"}
+
+
 # ---------------------------------------------------------------------------
-# 2. KELOMPOK SAHAM SEJENIS (pembanding). Silakan tambah/ubah sendiri.
+# KAMUS ISTILAH & SINGKATAN (untuk belajar)
+#   nama    : kepanjangan / nama lengkap
+#   arti    : penjelasan singkat dengan bahasa sederhana
+#   patokan : cara membaca angkanya (patokan umum, bukan aturan mutlak)
 # ---------------------------------------------------------------------------
-KELOMPOK = {
-    "Bank": ["BBCA", "BBRI", "BMRI", "BBNI", "BRIS", "BBTN", "ARTO"],
-    "Telekomunikasi": ["TLKM", "ISAT", "EXCL"],
-    "Menara": ["TOWR", "TBIG", "MTEL"],
-    "Konsumer": ["UNVR", "ICBP", "INDF", "MYOR", "KLBF", "SIDO", "CMRY"],
-    "Batu Bara": ["ADRO", "PTBA", "ITMG", "HRUM", "INDY", "AADI"],
-    "Logam & Tambang": ["ANTM", "INCO", "MDKA", "TINS", "NCKL"],
-    "Otomotif & Alat Berat": ["ASII", "UNTR", "AUTO"],
-    "Semen": ["SMGR", "INTP"],
-    "Properti": ["BSDE", "CTRA", "PWON", "SMRA"],
-    "Ritel": ["AMRT", "MIDI", "MAPI", "ACES"],
-    "Energi & Gas": ["PGAS", "MEDC", "AKRA"],
-    "Rumah Sakit": ["MIKA", "HEAL", "SILO"],
+GLOSARIUM: dict[str, dict[str, str]] = {
+    # --- Umum
+    "BEI / .JK": dict(nama="Bursa Efek Indonesia",
+                      arti="Bursa saham Indonesia. Di Yahoo Finance, kode saham BEI diberi akhiran .JK (Jakarta), mis. BBCA.JK.",
+                      patokan="—"),
+    "Harga": dict(nama="Harga saham terakhir",
+                  arti="Harga transaksi terakhir per lembar saham. Di BEI, 1 lot = 100 lembar.",
+                  patokan="Harga murah/mahal tidak bisa dinilai dari angkanya saja — lihat PER dan PBV."),
+    "Kapitalisasi pasar": dict(nama="Market capitalization (market cap)",
+                               arti="Harga saham × jumlah seluruh saham beredar. Menggambarkan 'harga' seluruh perusahaan di bursa.",
+                               patokan="Big cap (> Rp100 T) umumnya lebih stabil; small cap lebih fluktuatif."),
+    "TTM": dict(nama="Trailing Twelve Months",
+                arti="Data 12 bulan terakhir (4 kuartal terakhir), bukan per tahun kalender.",
+                patokan="—"),
+    "YoY": dict(nama="Year on Year",
+                arti="Dibandingkan dengan periode yang sama tahun lalu, mis. kuartal III 2026 vs kuartal III 2025.",
+                patokan="—"),
+    "Peer": dict(nama="Saham sejenis / pembanding",
+                 arti="Perusahaan dalam sektor/industri yang sama. Rasio keuangan sebaiknya dibandingkan dengan peer, "
+                      "bukan dengan sektor lain (PER bank tidak sebanding dengan PER tambang).",
+                 patokan="—"),
+    # --- Fundamental
+    "Fundamental": dict(nama="Analisis fundamental",
+                        arti="Menilai kesehatan bisnis dari laporan keuangan: seberapa besar labanya, seberapa cepat tumbuh, "
+                             "seberapa besar utangnya.",
+                        patokan="Skor ≥ 65 kuat · 45–64 cukup · < 45 lemah."),
+    "ROE": dict(nama="Return on Equity (imbal hasil ekuitas)",
+                arti="Laba bersih ÷ modal pemegang saham. Dari setiap Rp100 modal pemilik, berapa rupiah laba yang dihasilkan setahun.",
+                patokan="≥ 15% bagus · 8–15% cukup · < 8% lemah."),
+    "ROA": dict(nama="Return on Assets (imbal hasil aset)",
+                arti="Laba bersih ÷ total aset. Seberapa efisien seluruh aset (termasuk yang dibiayai utang) menghasilkan laba.",
+                patokan="Bank ≥ 2% bagus (aset bank sangat besar) · non-bank ≥ 8% bagus."),
+    "NPM": dict(nama="Net Profit Margin (margin laba bersih)",
+                arti="Laba bersih ÷ pendapatan. Dari setiap Rp100 penjualan, berapa yang tersisa menjadi laba setelah semua biaya & pajak.",
+                patokan="≥ 15% tebal · 5–15% wajar · < 5% tipis. Ritel memang biasanya tipis."),
+    "Pertumbuhan pendapatan": dict(nama="Revenue growth (YoY)",
+                                   arti="Kenaikan/penurunan penjualan dibanding periode yang sama tahun lalu.",
+                                   patokan="≥ 10% bagus · negatif = penjualan menyusut."),
+    "Pertumbuhan laba": dict(nama="Earnings growth (YoY)",
+                             arti="Kenaikan/penurunan laba bersih dibanding periode yang sama tahun lalu.",
+                             patokan="≥ 10% bagus · negatif = laba turun."),
+    "DER": dict(nama="Debt to Equity Ratio (rasio utang terhadap modal)",
+                arti="Total utang ÷ modal sendiri. DER 0,5x = utang setengah dari modal. Makin tinggi, makin berat beban bunga & risikonya.",
+                patokan="≤ 0,5x sehat · 0,5–1,5x wajar · > 1,5x tinggi. Tidak dipakai untuk bank (simpanan nasabah tercatat sebagai utang)."),
+    "Current ratio": dict(nama="Rasio lancar",
+                          arti="Aset lancar ÷ utang lancar. Kemampuan membayar kewajiban yang jatuh tempo dalam 1 tahun.",
+                          patokan="≥ 1,5x sehat · 1–1,5x cukup · < 1x ketat. Tidak dipakai untuk bank."),
+    "EPS": dict(nama="Earnings per Share (laba per saham)",
+                arti="Laba bersih ÷ jumlah saham beredar. Jatah laba untuk setiap lembar saham.",
+                patokan="Positif = untung, negatif = rugi. Yang dicari: EPS naik dari tahun ke tahun."),
+    # --- Valuasi
+    "Valuasi": dict(nama="Penilaian murah/mahal",
+                    arti="Membandingkan harga saham dengan laba (PER) dan nilai buku (PBV) perusahaan.",
+                    patokan="Skor tinggi = relatif murah. Saham bagus jarang murah — bandingkan dengan peer."),
+    "PER": dict(nama="Price to Earnings Ratio",
+                arti="Harga ÷ EPS. Berapa kali laba setahun yang Anda bayar. PER 10x ≈ butuh 10 tahun laba (jika laba tetap) "
+                     "untuk 'balik modal'.",
+                patokan="< 12x murah · 12–25x wajar · > 25x mahal. Kosong/negatif = perusahaan rugi."),
+    "PBV": dict(nama="Price to Book Value",
+                arti="Harga ÷ nilai buku (modal) per saham. PBV 1x = harga sama dengan nilai bersih aset perusahaan.",
+                patokan="< 1,5x murah · 1,5–4x wajar · > 4x mahal. Perusahaan dengan ROE tinggi wajar ber-PBV tinggi."),
+    # --- Dividen
+    "Dividen": dict(nama="Dividen",
+                    arti="Bagian laba yang dibagikan tunai kepada pemegang saham, biasanya setahun sekali atau dua kali (interim & final).",
+                    patokan="—"),
+    "Dividend yield": dict(nama="Imbal hasil dividen",
+                           arti="Total dividen 12 bulan terakhir ÷ harga sekarang. Mirip 'bunga' tahunan dari memegang saham.",
+                           patokan="≥ 5% tinggi (di atas bunga deposito) · 2–5% sedang · < 1% kecil."),
+    "DPS": dict(nama="Dividend per Share (dividen per saham)",
+                arti="Rupiah dividen yang diterima untuk setiap lembar saham.",
+                patokan="Contoh: DPS Rp200 × 1 lot (100 lembar) = Rp20.000."),
+    "Payout ratio": dict(nama="Rasio pembagian dividen",
+                         arti="Dividen ÷ laba bersih. Porsi laba yang dibagikan; sisanya ditahan untuk ekspansi.",
+                         patokan="30–70% ideal · > 100% berarti membagi melebihi laba (tidak bisa bertahan lama)."),
+    "Konsistensi dividen": dict(nama="Rutin dibagikan",
+                                arti="Berapa tahun dari 5 tahun terakhir perusahaan membagikan dividen.",
+                                patokan="5/5 sangat rutin · ≤ 2/5 tidak bisa diandalkan."),
+    "CAGR": dict(nama="Compound Annual Growth Rate",
+                 arti="Rata-rata pertumbuhan per tahun yang 'majemuk' (berbunga), di sini untuk dividen 3 tahun.",
+                 patokan="Positif = dividen makin besar dari tahun ke tahun."),
+    # --- Tren / teknikal
+    "Candle": dict(nama="Candlestick (grafik lilin)",
+                   arti="Satu batang yang merangkum 4 harga dalam satu periode: Open, High, Low, Close. "
+                        "Hijau = naik (close > open), merah = turun (close < open).",
+                   patokan="Lihat panduan '🕯️ Cara membaca grafik candle' di tab Tren."),
+    "OHLC": dict(nama="Open · High · Low · Close",
+                 arti="Harga pembukaan, tertinggi, terendah, dan penutupan dalam satu periode (di sini: 1 hari bursa).",
+                 patokan="—"),
+    "MA": dict(nama="Moving Average (rata-rata bergerak)",
+               arti="Rata-rata harga penutupan N hari terakhir yang terus bergeser setiap hari. Menghaluskan grafik "
+                    "sehingga arah tren lebih jelas.",
+               patokan="Harga di atas MA = cenderung naik; di bawah MA = cenderung turun."),
+    "MA20": dict(nama="Moving Average 20 hari",
+                 arti="Rata-rata 20 hari bursa (± 1 bulan). Menggambarkan tren jangka pendek.",
+                 patokan="MA20 di atas MA50 = momentum jangka pendek menguat."),
+    "MA50": dict(nama="Moving Average 50 hari",
+                 arti="Rata-rata 50 hari bursa (± 2,5 bulan). Tren jangka menengah.",
+                 patokan="Sering jadi area 'support' (penahan turun) saat tren naik."),
+    "MA200": dict(nama="Moving Average 200 hari",
+                  arti="Rata-rata 200 hari bursa (± 1 tahun). Patokan tren jangka panjang yang paling populer.",
+                  patokan="Harga di atas MA200 & MA200 menanjak = uptrend jangka panjang."),
+    "Golden / death cross": dict(nama="Persilangan MA",
+                                 arti="Golden cross: MA pendek (MA50) memotong ke atas MA panjang (MA200) → sinyal tren naik. "
+                                      "Death cross: memotong ke bawah → sinyal tren turun.",
+                                 patokan="Sinyal lambat, lebih untuk konfirmasi daripada waktu beli."),
+    "RSI": dict(nama="Relative Strength Index (14 hari)",
+                arti="Indikator kecepatan naik-turun harga, skala 0–100.",
+                patokan="≥ 70 jenuh beli (overbought, rawan koreksi) · ≤ 30 jenuh jual (oversold, bisa memantul) · 30–70 netral."),
+    "Jenuh beli / jenuh jual": dict(nama="Overbought / oversold",
+                                    arti="Jenuh beli: harga naik terlalu cepat sehingga rawan turun sementara. "
+                                         "Jenuh jual: turun terlalu dalam sehingga berpotensi memantul.",
+                                    patokan="Dibaca dari RSI ≥ 70 atau ≤ 30."),
+    "Uptrend / downtrend / sideways": dict(nama="Arah tren",
+                                           arti="Uptrend: puncak & lembah makin tinggi. Downtrend: makin rendah. "
+                                                "Sideways: bergerak mendatar dalam rentang tertentu.",
+                                           patokan="—"),
+    "Momentum": dict(nama="Momentum harga",
+                     arti="Kekuatan & kecepatan pergerakan harga belakangan ini (di sini: 1 bulan terakhir dan MA20 vs MA50).",
+                     patokan="—"),
+    "Koreksi": dict(nama="Koreksi harga",
+                    arti="Penurunan harga sementara (biasanya 5–20%) di tengah tren naik.",
+                    patokan="—"),
+    "Support / resistance": dict(nama="Area penahan harga",
+                                 arti="Support: area harga di mana penurunan sering tertahan (banyak pembeli). "
+                                      "Resistance: area di mana kenaikan sering tertahan (banyak penjual).",
+                                 patokan="MA50/MA200 dan harga terendah/tertinggi sebelumnya sering menjadi support/resistance."),
+    "Return": dict(nama="Imbal hasil harga",
+                   arti="Persentase kenaikan/penurunan harga dalam suatu periode (belum termasuk dividen).",
+                   patokan="—"),
+    "YTD": dict(nama="Year to Date",
+                arti="Perubahan harga sejak penutupan akhir tahun lalu sampai hari ini.",
+                patokan="—"),
+    "Rentang 52 minggu": dict(nama="52-week range",
+                              arti="Harga terendah dan tertinggi dalam 1 tahun terakhir. Posisi 0% = di titik terendah, 100% = di puncak.",
+                              patokan="—"),
+    "Kinerja relatif": dict(nama="Perbandingan return",
+                            arti="Semua saham dimulai dari 0% pada hari yang sama, sehingga kenaikan/penurunannya bisa dibandingkan "
+                                 "walau harganya berbeda jauh.",
+                            patokan="—"),
+    # --- Hasil
+    "Skor": dict(nama="Skor 0–100 aplikasi ini",
+                 arti="Penilaian otomatis dari aturan sederhana. Skor total = Fundamental 35% + Valuasi 20% + Dividen 15% + Tren 30%.",
+                 patokan="BELI ≥ 65 · TAHAN 45–64 · JUAL < 45."),
+    "BELI / TAHAN / JUAL": dict(nama="Rekomendasi sistem",
+                                arti="BELI: skor tinggi di banyak aspek. TAHAN: campuran — pegang jika sudah punya, tunggu jika belum. "
+                                     "JUAL: banyak kelemahan. DATA KURANG: data fundamental tidak tersedia.",
+                                patokan="Bahan belajar, bukan nasihat investasi."),
 }
-MAKS_PEMBANDING = 4
 
 
-def normalisasi_kode(kode: str) -> str:
-    kode = kode.strip().upper()
-    if kode.startswith("."):
-        return kode[1:]
-    return kode if "." in kode else kode + ".JK"
+def tip(key: str) -> str:
+    """Teks tooltip (ikon ⓘ) untuk sebuah istilah."""
+    g = GLOSARIUM[key]
+    teks = f"**{key}** — {g['nama']}.\n\n{g['arti']}"
+    if g["patokan"] != "—":
+        teks += f"\n\n*Patokan:* {g['patokan']}"
+    return teks
 
 
-def kode_pendek(simbol: str) -> str:
-    return simbol[:-3] if simbol.endswith(".JK") else simbol
-
-
-def cari_pembanding(simbol: str) -> tuple[str, list[str]]:
-    pendek = kode_pendek(simbol)
-    for nama, anggota in KELOMPOK.items():
-        if pendek in anggota:
-            lain = [normalisasi_kode(k) for k in anggota if k != pendek]
-            return nama, lain[:MAKS_PEMBANDING]
-    return "", []
+def catatan_kaki(keys: list[str], judul: str = "📘 Catatan kaki: arti istilah di bagian ini") -> None:
+    """Daftar istilah bernomor di bawah setiap bagian (hanya tampil saat Mode belajar aktif)."""
+    if not st.session_state.get("belajar", True):
+        return
+    with st.expander(judul):
+        baris = []
+        for i, k in enumerate(keys, 1):
+            g = GLOSARIUM[k]
+            s = f"{i}. **{k}** — *{g['nama']}*. {g['arti']}"
+            if g["patokan"] != "—":
+                s += f"  \n   ↳ *Patokan:* {g['patokan']}"
+            baris.append(s)
+        st.markdown("\n".join(baris))
 
 
 # ---------------------------------------------------------------------------
-# 3. PENGAMBILAN DATA
+# Utilitas
 # ---------------------------------------------------------------------------
-def ambil_data_yahoo(simbol: str) -> dict:
+def normalize_ticker(raw: str, idx_default: bool = True) -> str:
+    t = raw.strip().upper()
+    if not t:
+        return t
+    if idx_default and "." not in t and "^" not in t and "=" not in t:
+        t += ".JK"
+    return t
+
+
+def base_code(ticker: str) -> str:
+    return ticker.split(".")[0].upper()
+
+
+def find_peers(ticker: str) -> tuple[str | None, list[str]]:
+    code = base_code(ticker)
+    for group, members in PEER_GROUPS.items():
+        if code in members:
+            return group, [m for m in members if m != code]
+    return None, []
+
+
+def num(x) -> float | None:
+    """Ubah ke float; None jika kosong/NaN/tak valid."""
     try:
-        import yfinance as yf
-    except ImportError:
-        sys.exit("Butuh yfinance. Jalankan:  pip3 install yfinance")
-    t = yf.Ticker(simbol)
-    hist = t.history(period="6y", auto_adjust=False)
-    if hist.empty:
-        raise ValueError(f"Data harga {simbol} kosong (kode salah?)")
-    try:
-        info = t.info or {}
-    except Exception:
-        info = {}
-    close = hist["Close"].dropna()
-    close.index = close.index.tz_localize(None)
-    div = t.dividends
-    if len(div):
-        div.index = div.index.tz_localize(None)
-    return {"simbol": simbol, "close": close, "dividen": div, "info": info}
-
-
-def ambil_data_demo(simbol: str, sampai: dt.date) -> dict:
-    """Data karangan yang konsisten per kode — untuk mencoba aplikasi tanpa internet."""
-    rng = random.Random(sum(ord(c) * (i + 1) for i, c in enumerate(simbol)))
-    akhir = pd.Timestamp(dt.date.today())
-    tanggal = pd.bdate_range(end=akhir, periods=252 * 6)
-    harga = rng.uniform(500, 9000)
-    drift = rng.uniform(-0.0004, 0.0008)
-    nilai = []
-    for _ in tanggal:
-        harga *= math.exp(drift + rng.gauss(0, 0.018))
-        nilai.append(round(harga))
-    close = pd.Series(nilai, index=tanggal, dtype=float)
-    close = close[close.index <= pd.Timestamp(sampai)]
-    bayar = rng.random() > 0.15
-    div_idx, div_val = [], []
-    if bayar:
-        for th in range(sampai.year - 5, sampai.year + 1):
-            d = pd.Timestamp(dt.date(th, rng.randint(4, 6), rng.randint(1, 28)))
-            if d <= pd.Timestamp(sampai):
-                div_idx.append(d)
-                div_val.append(round(float(close.asof(d)) * rng.uniform(0.01, 0.07)))
-    dividen = pd.Series(div_val, index=pd.DatetimeIndex(div_idx), dtype=float)
-    grup, _ = cari_pembanding(simbol)
-    eps = float(close.iloc[-1]) / rng.uniform(5, 35)
-    info = {
-        "longName": f"PT {kode_pendek(simbol)} Contoh Tbk (DEMO)",
-        "sector": "Financial Services" if grup == "Bank" else "Demo",
-        "industry": grup or "Lainnya",
-        "marketCap": float(close.iloc[-1]) * rng.uniform(1e9, 1.2e11),
-        "trailingEps": eps,
-        "trailingPE": float(close.iloc[-1]) / eps,
-        "priceToBook": rng.uniform(0.6, 5.5),
-        "returnOnEquity": rng.uniform(-0.03, 0.30),
-        "profitMargins": rng.uniform(-0.02, 0.35),
-        "debtToEquity": rng.uniform(10, 220),
-        "earningsGrowth": rng.uniform(-0.25, 0.35),
-        "revenueGrowth": rng.uniform(-0.15, 0.25),
-        "currentRatio": rng.uniform(0.6, 3.0),
-        "payoutRatio": rng.uniform(0.2, 0.9) if bayar else 0,
-    }
-    return {"simbol": simbol, "close": close, "dividen": dividen, "info": info}
-
-
-# ---------------------------------------------------------------------------
-# 4. PERHITUNGAN
-# ---------------------------------------------------------------------------
-def angka(x):
-    """Ubah ke float; kembalikan None jika kosong/tidak valid."""
-    try:
-        f = float(x)
-        return None if math.isnan(f) or math.isinf(f) else f
+        if x is None:
+            return None
+        v = float(x)
+        if math.isnan(v) or math.isinf(v):
+            return None
+        return v
     except (TypeError, ValueError):
         return None
 
 
-def hitung_rsi(close: pd.Series, n: int = 14) -> float | None:
-    d = close.diff().dropna()
-    if len(d) < n + 1:
+def scale(x: float | None, bad: float, good: float) -> float | None:
+    """Skor 0–100 linier: nilai 'bad' -> 0, 'good' -> 100 (bisa terbalik)."""
+    if x is None:
         return None
-    naik = d.clip(lower=0).ewm(alpha=1 / n, adjust=False).mean()
-    turun = (-d.clip(upper=0)).ewm(alpha=1 / n, adjust=False).mean()
-    rs = naik.iloc[-1] / turun.iloc[-1] if turun.iloc[-1] else float("inf")
-    return 100 - 100 / (1 + rs)
+    if good == bad:
+        return 50.0
+    s = (x - bad) / (good - bad) * 100
+    return float(max(0.0, min(100.0, s)))
 
 
-def ret(close: pd.Series, hari: int):
-    if len(close) <= hari:
+def avg(values) -> float | None:
+    vals = [v for v in values if v is not None]
+    return float(np.mean(vals)) if vals else None
+
+
+def weighted(parts: list[tuple[float | None, float]]) -> float | None:
+    avail = [(s, w) for s, w in parts if s is not None]
+    if not avail:
         return None
-    return (close.iloc[-1] / close.iloc[-1 - hari] - 1) * 100
+    tw = sum(w for _, w in avail)
+    return sum(s * w for s, w in avail) / tw
 
 
-def analisis(data: dict) -> dict:
-    close: pd.Series = data["close"]
-    info = data["info"]
-    div: pd.Series = data["dividen"]
-    harga = float(close.iloc[-1])
-    tgl_akhir = close.index[-1]
+def fmt_pct(x, digits=1) -> str:
+    return "–" if x is None else f"{x * 100:.{digits}f}%".replace(".", ",")
 
-    # --- Teknikal / tren
-    ma = {n: close.rolling(n).mean() for n in (20, 50, 200)}
-    ma_now = {n: angka(ma[n].iloc[-1]) for n in ma}
-    awal_tahun = close[close.index.year == tgl_akhir.year]
-    ytd = (harga / float(close[close.index < awal_tahun.index[0]].iloc[-1]) - 1) * 100 \
-        if len(close[close.index < awal_tahun.index[0]]) else None
 
-    bulanan = close.resample("ME").last()
-    ret_bulanan = (bulanan.pct_change() * 100).dropna().tail(12)
-    tahunan = close.resample("YE").last()
-    ret_tahunan = (tahunan.pct_change() * 100).dropna().tail(5)
+def fmt_num(x, digits=2) -> str:
+    return "–" if x is None else f"{x:,.{digits}f}".replace(",", "_").replace(".", ",").replace("_", ".")
 
-    cross = None
-    selisih = (ma[50] - ma[200]).dropna().tail(60)
-    if len(selisih) > 1:
-        tanda = (selisih > 0).astype(int).diff().fillna(0)
-        if (tanda > 0).any():
-            cross = ("Golden Cross", tanda[tanda > 0].index[-1])
-        elif (tanda < 0).any():
-            cross = ("Death Cross", tanda[tanda < 0].index[-1])
 
-    m20, m50, m200 = ma_now[20], ma_now[50], ma_now[200]
-    if m50 and m200 and harga > m50 > m200:
-        tren = "Naik kuat"
-    elif m50 and m200 and harga < m50 < m200:
-        tren = "Turun kuat"
-    elif m200 and harga > m200:
-        tren = "Naik (koreksi jangka pendek)" if m50 and harga < m50 else "Naik"
-    elif m200:
-        tren = "Turun (memantul jangka pendek)" if m50 and harga > m50 else "Turun"
+def fmt_price(x, currency="IDR") -> str:
+    if x is None:
+        return "–"
+    if currency == "IDR":
+        return "Rp " + f"{x:,.0f}".replace(",", ".")
+    return f"{currency} {x:,.2f}"
+
+
+def fmt_big(x, currency="IDR") -> str:
+    if x is None:
+        return "–"
+    for div, suf in [(1e12, " T"), (1e9, " M"), (1e6, " Jt")]:
+        if abs(x) >= div:
+            v = f"{x / div:,.2f}".replace(",", "_").replace(".", ",").replace("_", ".")
+            return ("Rp " if currency == "IDR" else currency + " ") + v + suf
+    return fmt_price(x, currency)
+
+
+def _resample(series: pd.Series, rule_new: str, rule_old: str) -> pd.Series:
+    try:
+        return series.resample(rule_new).last()
+    except (ValueError, KeyError):
+        return series.resample(rule_old).last()
+
+
+def rsi(close: pd.Series, period: int = 14) -> float | None:
+    if len(close) < period + 1:
+        return None
+    delta = close.diff()
+    gain = delta.clip(lower=0).ewm(alpha=1 / period, adjust=False).mean()
+    loss = (-delta.clip(upper=0)).ewm(alpha=1 / period, adjust=False).mean()
+    rs = gain / loss.replace(0, np.nan)
+    val = 100 - 100 / (1 + rs.iloc[-1])
+    return num(val) if not pd.isna(val) else 100.0
+
+
+# ---------------------------------------------------------------------------
+# Ambil data (di-cache 1 jam agar tidak membebani Yahoo)
+# ---------------------------------------------------------------------------
+@st.cache_data(ttl=3600, show_spinner=False)
+def fetch(ticker: str) -> dict:
+    t = yf.Ticker(ticker)
+    try:
+        info = t.info or {}
+    except Exception:  # noqa: BLE001
+        info = {}
+    try:
+        hist = t.history(period="5y", interval="1d", auto_adjust=True)
+    except Exception:  # noqa: BLE001
+        hist = pd.DataFrame()
+    try:
+        divs = t.dividends
+    except Exception:  # noqa: BLE001
+        divs = pd.Series(dtype=float)
+    if hist is not None and not hist.empty and getattr(hist.index, "tz", None) is not None:
+        hist.index = hist.index.tz_localize(None)
+    if divs is not None and not divs.empty and getattr(divs.index, "tz", None) is not None:
+        divs.index = divs.index.tz_localize(None)
+    return {"info": info, "hist": hist, "divs": divs}
+
+
+# ---------------------------------------------------------------------------
+# Analisis
+# ---------------------------------------------------------------------------
+def analyze(ticker: str) -> dict | None:
+    data = fetch(ticker)
+    info, hist, divs = data["info"], data["hist"], data["divs"]
+    if hist is None or hist.empty or "Close" not in hist:
+        return None
+
+    close = hist["Close"].dropna()
+    if close.empty:
+        return None
+    price = num(info.get("currentPrice")) or num(info.get("regularMarketPrice")) or float(close.iloc[-1])
+    currency = info.get("currency") or "IDR"
+    sector = info.get("sector") or "-"
+    industry = info.get("industry") or "-"
+    is_fin = sector in FINANCIAL_SECTORS or "bank" in str(industry).lower()
+
+    # ---- 1. Fundamental -------------------------------------------------
+    roe = num(info.get("returnOnEquity"))
+    roa = num(info.get("returnOnAssets"))
+    npm = num(info.get("profitMargins"))
+    rev_g = num(info.get("revenueGrowth"))
+    eps_g = num(info.get("earningsGrowth"))
+    der = num(info.get("debtToEquity"))  # dalam persen, mis. 45 = 0,45x
+    cur = num(info.get("currentRatio"))
+
+    f_scores = {
+        "ROE": scale(roe, 0.05, 0.20),
+        "ROA": scale(roa, 0.005, 0.025) if is_fin else scale(roa, 0.02, 0.10),
+        "Margin laba bersih": scale(npm, 0.02, 0.25),
+        "Pertumbuhan pendapatan": scale(rev_g, -0.05, 0.15),
+        "Pertumbuhan laba": scale(eps_g, -0.10, 0.20),
+    }
+    if not is_fin:  # DER & current ratio kurang relevan untuk bank
+        f_scores["Rasio utang (DER)"] = scale(der, 200, 30)
+        f_scores["Current ratio"] = scale(cur, 0.8, 2.0)
+    fund_score = avg(f_scores.values())
+
+    # ---- Valuasi ---------------------------------------------------------
+    pe = num(info.get("trailingPE"))
+    pbv = num(info.get("priceToBook"))
+    eps = num(info.get("trailingEps"))
+    if pe is None and eps is not None and eps <= 0:
+        pe_score = 10.0  # rugi
     else:
-        tren = "Data belum cukup"
+        pe_score = scale(pe, 30, 8) if (pe is not None and pe > 0) else None
+    val_scores = {"PER": pe_score, "PBV": scale(pbv, 5, 1)}
+    val_score = avg(val_scores.values())
 
-    rsi = hitung_rsi(close)
+    # ---- 2. Dividen -----------------------------------------------------
+    last_date = close.index[-1]
+    div_ttm = 0.0
+    div_by_year = pd.Series(dtype=float)
+    if divs is not None and not divs.empty:
+        div_ttm = float(divs[divs.index > last_date - timedelta(days=365)].sum())
+        div_by_year = divs.groupby(divs.index.year).sum()
+    div_yield = div_ttm / price if price else None
+    payout = num(info.get("payoutRatio"))
+    this_year = last_date.year
+    last5 = [y for y in range(this_year - 5, this_year)]
+    years_paid = sum(1 for y in last5 if y in div_by_year.index and div_by_year[y] > 0)
+    consistency = years_paid / 5
 
-    # --- Dividen
-    satu_th_lalu = tgl_akhir - pd.Timedelta(days=365)
-    div12 = float(div[div.index > satu_th_lalu].sum()) if len(div) else 0.0
-    yield1 = div12 / harga * 100 if harga else None
-    tahun_lengkap = list(range(tgl_akhir.year - 5, tgl_akhir.year))
-    per_tahun = {th: float(div[div.index.year == th].sum()) if len(div) else 0.0 for th in tahun_lengkap}
-    tahun_bayar = sum(1 for v in per_tahun.values() if v > 0)
-    yield5 = (sum(per_tahun.values()) / 5) / harga * 100 if harga else None
-    payout = angka(info.get("payoutRatio"))
+    if payout is None:
+        payout_score = None
+    elif payout <= 0:
+        payout_score = 0.0
+    elif 0.3 <= payout <= 0.7:
+        payout_score = 100.0
+    elif payout < 0.3:
+        payout_score = scale(payout, 0.0, 0.3)
+    elif payout <= 1.0:
+        payout_score = scale(payout, 1.0, 0.7)
+    else:
+        payout_score = 10.0  # membagi lebih dari laba -> tidak berkelanjutan
+    div_score = weighted([
+        (scale(div_yield, 0.0, 0.06), 0.5),
+        (consistency * 100, 0.3),
+        (payout_score, 0.2),
+    ])
 
-    # --- Fundamental
-    f = {
-        "PER": angka(info.get("trailingPE")),
-        "PBV": angka(info.get("priceToBook")),
-        "EPS": angka(info.get("trailingEps")),
-        "ROE": pct(info.get("returnOnEquity")),
-        "NPM": pct(info.get("profitMargins")),
-        "DER": (angka(info.get("debtToEquity")) / 100) if angka(info.get("debtToEquity")) is not None else None,
-        "Pertumbuhan Laba": pct(info.get("earningsGrowth")),
-        "Pertumbuhan Pendapatan": pct(info.get("revenueGrowth")),
-        "Current Ratio": angka(info.get("currentRatio")),
-    }
-    if f["PER"] is None and f["EPS"]:
-        f["PER"] = harga / f["EPS"]
-    keuangan = (info.get("sector") or "").lower().startswith("financial")
+    # Pertumbuhan dividen (CAGR 3 tahun penuh terakhir)
+    div_cagr = None
+    y_end, y_start = this_year - 1, this_year - 4
+    if y_end in div_by_year.index and y_start in div_by_year.index and div_by_year[y_start] > 0:
+        div_cagr = (div_by_year[y_end] / div_by_year[y_start]) ** (1 / 3) - 1
 
-    hasil = {
-        "simbol": data["simbol"],
-        "kode": kode_pendek(data["simbol"]),
-        "nama": info.get("longName") or info.get("shortName") or kode_pendek(data["simbol"]),
-        "sektor": info.get("sector") or "-",
-        "industri": info.get("industry") or "-",
-        "tanggal_data": tgl_akhir.strftime("%Y-%m-%d"),
-        "harga": harga,
-        "kapitalisasi": angka(info.get("marketCap")),
-        "keuangan": keuangan,
-        "fundamental": f,
-        "dividen": {
-            "Dividend Yield": yield1, "Yield Rata-rata 5 Th": yield5,
-            "Payout Ratio": payout * 100 if payout is not None else None,
-            "Konsistensi Dividen": tahun_bayar, "div12": div12,
-            "per_tahun": {str(k): v for k, v in per_tahun.items()},
-        },
-        "teknikal": {
-            "MA20": m20, "MA50": m50, "MA200": m200, "RSI": rsi, "tren": tren,
-            "cross": [cross[0], cross[1].strftime("%Y-%m-%d")] if cross else None,
-            "Return 1 Bln": ret(close, 21), "Return 3 Bln": ret(close, 63),
-            "Return 6 Bln": ret(close, 126), "Return 1 Th": ret(close, 252),
-            "YTD": ytd,
-            "bulanan": {k.strftime("%b %Y"): round(float(v), 2) for k, v in ret_bulanan.items()},
-            "tahunan": {str(k.year): round(float(v), 2) for k, v in ret_tahunan.items()},
-        },
-        "grafik": {
-            "tanggal": [d.strftime("%Y-%m-%d") for d in close.index[-252:]],
-            "harga": [round(float(v), 2) for v in close.iloc[-252:]],
-            **{f"ma{n}": [None if pd.isna(v) else round(float(v), 2) for v in ma[n].iloc[-252:]] for n in ma},
-        },
-    }
-    beri_skor(hasil)
-    return hasil
+    # ---- 3. Tren --------------------------------------------------------
+    ma20 = close.rolling(20).mean()
+    ma50 = close.rolling(50).mean()
+    ma200 = close.rolling(200).mean()
 
+    def ret_over(days: int) -> float | None:
+        past = close[close.index <= last_date - timedelta(days=days)]
+        return float(close.iloc[-1] / past.iloc[-1] - 1) if not past.empty else None
 
-def pct(x):
-    v = angka(x)
-    return v * 100 if v is not None else None
+    r1m, r3m, r6m, r1y, r3y = (ret_over(d) for d in (30, 91, 182, 365, 1095))
+    ytd_base = close[close.index < datetime(this_year, 1, 1)]
+    ytd = float(close.iloc[-1] / ytd_base.iloc[-1] - 1) if not ytd_base.empty else None
 
+    last_1y = close[close.index > last_date - timedelta(days=365)]
+    hi52, lo52 = float(last_1y.max()), float(last_1y.min())
+    pos52 = (close.iloc[-1] - lo52) / (hi52 - lo52) if hi52 > lo52 else None
 
-# ---------------------------------------------------------------------------
-# 5. SKOR & REKOMENDASI (aturan sederhana, transparan — ubah sesuai selera)
-# ---------------------------------------------------------------------------
-def tangga(nilai, aturan, default=0):
-    """aturan = [(batas, poin), ...] dicek berurutan: nilai >= batas -> poin."""
-    for batas, poin in aturan:
-        if nilai >= batas:
-            return poin
-    return default
+    above200 = num(ma200.iloc[-1]) is not None and close.iloc[-1] > ma200.iloc[-1]
+    ma200_slope = None
+    if len(ma200.dropna()) > 21:
+        ma200_slope = float(ma200.iloc[-1] / ma200.iloc[-21] - 1)
+    ma20_above_50 = num(ma50.iloc[-1]) is not None and ma20.iloc[-1] > ma50.iloc[-1]
+    rsi14 = rsi(close)
 
+    def trend_label(ret, up_flag, thr):
+        if ret is None:
+            return "–"
+        if ret > thr and up_flag:
+            return "Naik (uptrend)"
+        if ret < -thr and not up_flag:
+            return "Turun (downtrend)"
+        return "Sideways / campuran"
 
-def beri_skor(h: dict) -> None:
-    f, d, t = h["fundamental"], h["dividen"], h["teknikal"]
-    alasan_plus, alasan_min = [], []
+    yearly_trend = trend_label(r1y, above200, 0.10)
+    monthly_trend = trend_label(r1m, ma20_above_50, 0.03)
 
-    # Fundamental (maks 100, dinormalisasi jika ada data kosong)
-    poin, maks = 0.0, 0.0
+    yearly_score = avg([
+        scale(r1y, -0.20, 0.30),
+        100.0 if above200 else 0.0,
+        scale(ma200_slope, -0.03, 0.03),
+    ])
+    rsi_score = None if rsi14 is None else max(0.0, 100 - abs(rsi14 - 55) * 2.2)
+    monthly_score = avg([
+        scale(r1m, -0.08, 0.08),
+        100.0 if ma20_above_50 else 0.0,
+        rsi_score,
+    ])
+    trend_score = weighted([(yearly_score, 0.6), (monthly_score, 0.4)])
 
-    def tambah(p, m):
-        nonlocal poin, maks
-        poin += p
-        maks += m
+    annual_ret = _resample(close, "YE", "Y").pct_change().dropna()
+    annual_ret.index = annual_ret.index.year
+    monthly_ret = _resample(close, "ME", "M").pct_change().dropna().tail(12)
 
-    if f["ROE"] is not None:
-        tambah(tangga(f["ROE"], [(20, 25), (15, 20), (10, 12), (5, 6)]), 25)
-        if f["ROE"] >= 15:
-            alasan_plus.append(f"ROE tinggi ({fmt(f['ROE'], 1)}%)")
-        elif f["ROE"] < 8:
-            alasan_min.append(f"ROE rendah ({fmt(f['ROE'], 1)}%)")
-    if f["NPM"] is not None:
-        tambah(tangga(f["NPM"], [(20, 15), (10, 11), (5, 6), (0.01, 3)]), 15)
-    if f["DER"] is not None and not h["keuangan"]:
-        tambah(15 if f["DER"] <= 0.5 else 11 if f["DER"] <= 1 else 6 if f["DER"] <= 2 else 2, 15)
-        if f["DER"] > 2:
-            alasan_min.append(f"utang tinggi (DER {fmt(f['DER'], 2)}×)")
-    if f["PER"] is not None:
-        p = 0 if f["PER"] <= 0 else 20 if f["PER"] <= 10 else 16 if f["PER"] <= 15 else 11 if f["PER"] <= 20 else 6 if f["PER"] <= 30 else 0
-        tambah(p, 20)
-        if f["PER"] <= 0:
-            alasan_min.append("perusahaan merugi (PER negatif)")
-        elif f["PER"] <= 12:
-            alasan_plus.append(f"valuasi murah (PER {fmt(f['PER'], 1)}×)")
-        elif f["PER"] > 30:
-            alasan_min.append(f"valuasi mahal (PER {fmt(f['PER'], 1)}×)")
-    if f["PBV"] is not None:
-        tambah(10 if f["PBV"] <= 1 else 8 if f["PBV"] <= 2 else 5 if f["PBV"] <= 3 else 2 if f["PBV"] <= 5 else 0, 10)
-    if f["Pertumbuhan Laba"] is not None:
-        tambah(tangga(f["Pertumbuhan Laba"], [(15, 15), (5, 10), (0, 5)]), 15)
-        if f["Pertumbuhan Laba"] >= 15:
-            alasan_plus.append(f"laba tumbuh {fmt(f['Pertumbuhan Laba'], 1)}%")
-        elif f["Pertumbuhan Laba"] < 0:
-            alasan_min.append(f"laba turun {fmt(f['Pertumbuhan Laba'], 1)}%")
-    s_fund = round(poin / maks * 100) if maks else 50
+    # ---- 4. Skor total & rekomendasi -----------------------------------
+    total = weighted([
+        (fund_score, 0.35),
+        (val_score, 0.20),
+        (div_score, 0.15),
+        (trend_score, 0.30),
+    ])
+    if total is None or fund_score is None:
+        reco = "DATA KURANG"
+    elif total >= 65:
+        reco = "BELI"
+    elif total >= 45:
+        reco = "TAHAN"
+    else:
+        reco = "JUAL"
 
-    # Dividen
-    y = d["Dividend Yield"] or 0
-    s_div = tangga(y, [(6, 100), (4, 80), (2.5, 60), (1, 35), (0.01, 15)])
-    s_div *= 0.6 + 0.08 * d["Konsistensi Dividen"]
-    if d["Payout Ratio"] and d["Payout Ratio"] > 100:
-        s_div -= 15
-        alasan_min.append("payout ratio > 100%")
-    s_div = round(max(0, min(100, s_div)))
-    if y >= 4:
-        alasan_plus.append(f"dividen tinggi ({fmt(y, 1)}%/th)")
+    # Alasan (kekuatan & kelemahan)
+    pros, cons = [], []
+    if roe is not None:
+        (pros if roe >= 0.15 else cons if roe < 0.08 else []).append(f"ROE {fmt_pct(roe)}")
+    if npm is not None:
+        (pros if npm >= 0.15 else cons if npm < 0.05 else []).append(f"margin laba bersih {fmt_pct(npm)}")
+    if eps_g is not None:
+        (pros if eps_g >= 0.10 else cons if eps_g < 0 else []).append(f"pertumbuhan laba {fmt_pct(eps_g)}")
+    if not is_fin and der is not None:
+        (pros if der <= 50 else cons if der > 150 else []).append(f"DER {der / 100:.2f}x")
+    if pe is not None and pe > 0:
+        (pros if pe <= 12 else cons if pe > 25 else []).append(f"PER {pe:.1f}x")
+    elif eps is not None and eps <= 0:
+        cons.append("perusahaan sedang rugi (EPS negatif)")
+    if pbv is not None:
+        (pros if pbv <= 1.5 else cons if pbv > 4 else []).append(f"PBV {pbv:.2f}x")
+    if div_yield is not None:
+        (pros if div_yield >= 0.04 else cons if div_yield < 0.01 else []).append(f"dividend yield {fmt_pct(div_yield)}")
+    if consistency >= 0.8:
+        pros.append(f"rutin bagi dividen ({years_paid}/5 tahun)")
+    elif consistency <= 0.4:
+        cons.append(f"dividen tidak rutin ({years_paid}/5 tahun)")
+    if payout is not None and payout > 1:
+        cons.append(f"payout ratio {fmt_pct(payout, 0)} (> laba)")
+    if yearly_trend.startswith("Naik"):
+        pros.append("tren tahunan naik (di atas MA200)")
+    elif yearly_trend.startswith("Turun"):
+        cons.append("tren tahunan turun (di bawah MA200)")
+    if monthly_trend.startswith("Naik"):
+        pros.append("momentum bulanan positif")
+    elif monthly_trend.startswith("Turun"):
+        cons.append("momentum bulanan negatif")
+    if rsi14 is not None and rsi14 >= 70:
+        cons.append(f"RSI {rsi14:.0f} (jenuh beli, rawan koreksi)")
+    elif rsi14 is not None and rsi14 <= 30:
+        pros.append(f"RSI {rsi14:.0f} (jenuh jual, potensi pantul)")
 
-    # Tren
-    hrg = h["harga"]
-    s_tek = 50
-    for n, bobot in ((20, 8), (50, 10), (200, 15)):
-        m = t[f"MA{n}"]
-        if m:
-            s_tek += bobot if hrg > m else -bobot
-    if t["MA50"] and t["MA200"]:
-        s_tek += 7 if t["MA50"] > t["MA200"] else -7
-    if t["RSI"] is not None:
-        if t["RSI"] > 70:
-            s_tek -= 8
-            alasan_min.append(f"RSI {fmt(t['RSI'], 0)} — rawan koreksi")
-        elif t["RSI"] < 30:
-            s_tek += 5
-            alasan_plus.append(f"RSI {fmt(t['RSI'], 0)} — oversold")
-    if t["Return 1 Th"] is not None:
-        s_tek += 5 if t["Return 1 Th"] > 0 else -5
-    s_tek = max(0, min(100, s_tek))
-    if t["tren"].startswith("Naik kuat"):
-        alasan_plus.append("tren naik kuat")
-    elif t["tren"].startswith("Turun"):
-        alasan_min.append(f"tren {t['tren'].lower()}")
-
-    total = round(0.5 * s_fund + 0.2 * s_div + 0.3 * s_tek)
-    rek = "BELI" if total >= 65 else "TAHAN" if total >= 45 else "JUAL"
-    h["skor"] = {"fundamental": s_fund, "dividen": s_div, "tren": s_tek, "total": total}
-    h["rekomendasi"] = rek
-    h["alasan_plus"] = alasan_plus
-    h["alasan_min"] = alasan_min
-
-
-# ---------------------------------------------------------------------------
-# 6. PENJELASAN SINGKAT DI SEBELAH ANGKA
-# ---------------------------------------------------------------------------
-def tafsir(nama: str, v, h: dict) -> str:
-    if v is None:
-        return "data tidak tersedia"
-    if nama == "PER":
-        return "rugi" if v <= 0 else "murah" if v <= 10 else "wajar" if v <= 20 else "agak mahal" if v <= 30 else "mahal"
-    if nama == "PBV":
-        return "di bawah nilai buku" if v < 1 else "wajar" if v <= 3 else "premium"
-    if nama == "EPS":
-        return "laba positif" if v > 0 else "rugi"
-    if nama == "ROE":
-        return "sangat baik" if v >= 20 else "baik" if v >= 15 else "cukup" if v >= 8 else "lemah"
-    if nama == "NPM":
-        return "tebal" if v >= 20 else "sehat" if v >= 10 else "tipis" if v > 0 else "rugi"
-    if nama == "DER":
-        if h["keuangan"]:
-            return "wajar tinggi utk bank — tidak dinilai"
-        return "rendah" if v <= 0.5 else "sehat" if v <= 1 else "cukup tinggi" if v <= 2 else "tinggi"
-    if nama.startswith("Pertumbuhan"):
-        return "tumbuh pesat" if v >= 15 else "tumbuh" if v >= 0 else "menurun"
-    if nama == "Current Ratio":
-        return "likuid" if v >= 1.5 else "cukup" if v >= 1 else "ketat"
-    if nama in ("Dividend Yield", "Yield Rata-rata 5 Th"):
-        return "tinggi (> deposito)" if v >= 5 else "menarik" if v >= 3 else "sedang" if v >= 1 else "kecil" if v > 0 else "tidak ada"
-    if nama == "Payout Ratio":
-        return "terlalu tinggi" if v > 100 else "dermawan" if v > 70 else "wajar" if v >= 30 else "rendah"
-    if nama == "Konsistensi Dividen":
-        return "konsisten" if v >= 5 else "cukup rutin" if v >= 3 else "jarang"
-    if nama.startswith("MA"):
-        return "harga di atas → menguat" if h["harga"] > v else "harga di bawah → melemah"
-    if nama == "RSI":
-        return "overbought" if v > 70 else "oversold" if v < 30 else "netral"
-    return ""
-
-
-# ---------------------------------------------------------------------------
-# 7. SNAPSHOT & UPDATE
-# ---------------------------------------------------------------------------
-def snapshot_ringkas(h: dict) -> dict:
-    return {k: h[k] for k in ("kode", "nama", "harga", "skor", "rekomendasi", "tanggal_data")} | {
-        "PER": h["fundamental"]["PER"], "PBV": h["fundamental"]["PBV"], "ROE": h["fundamental"]["ROE"],
-        "yield": h["dividen"]["Dividend Yield"], "tren": h["teknikal"]["tren"],
+    return {
+        "ticker": ticker,
+        "code": base_code(ticker),
+        "name": info.get("longName") or info.get("shortName") or ticker,
+        "sector": sector,
+        "industry": industry,
+        "is_fin": is_fin,
+        "currency": currency,
+        "price": price,
+        "market_cap": num(info.get("marketCap")),
+        "hist": hist,
+        "close": close,
+        "ma20": ma20, "ma50": ma50, "ma200": ma200,
+        # fundamental
+        "roe": roe, "roa": roa, "npm": npm, "rev_g": rev_g, "eps_g": eps_g,
+        "der": der, "cur": cur, "pe": pe, "pbv": pbv, "eps": eps,
+        "f_scores": f_scores, "fund_score": fund_score,
+        "val_scores": val_scores, "val_score": val_score,
+        # dividen
+        "div_ttm": div_ttm, "div_yield": div_yield, "payout": payout,
+        "years_paid": years_paid, "div_by_year": div_by_year, "div_cagr": div_cagr,
+        "div_score": div_score,
+        # tren
+        "r1m": r1m, "r3m": r3m, "r6m": r6m, "r1y": r1y, "r3y": r3y, "ytd": ytd,
+        "hi52": hi52, "lo52": lo52, "pos52": pos52, "rsi": rsi14,
+        "above200": above200, "ma20_above_50": ma20_above_50,
+        "yearly_trend": yearly_trend, "monthly_trend": monthly_trend,
+        "yearly_score": yearly_score, "monthly_score": monthly_score,
+        "trend_score": trend_score,
+        "annual_ret": annual_ret, "monthly_ret": monthly_ret,
+        # hasil
+        "total": total, "reco": reco, "pros": pros, "cons": cons,
     }
 
 
-def cari_snapshot_lama(hari_ini: str, pilihan: str | None) -> tuple[str, dict] | None:
-    if pilihan:
-        p = Path(pilihan)
-        if not p.exists():
-            p = FOLDER_HASIL / f"snapshot_{pilihan}.json"
-        if not p.exists():
-            sys.exit(f"Snapshot pembanding tidak ditemukan: {pilihan}")
-        isi = json.loads(p.read_text(encoding="utf-8"))
-        return isi["tanggal"], isi["saham"]
-    kandidat = sorted(FOLDER_HASIL.glob("snapshot_*.json"))
-    kandidat = [p for p in kandidat if p.stem.replace("snapshot_", "") < hari_ini]
-    if not kandidat:
-        return None
-    isi = json.loads(kandidat[-1].read_text(encoding="utf-8"))
-    return isi["tanggal"], isi["saham"]
-
-
-def simpan_snapshot(hari_ini: str, semua: dict) -> Path:
-    FOLDER_HASIL.mkdir(exist_ok=True)
-    p = FOLDER_HASIL / f"snapshot_{hari_ini}.json"
-    p.write_text(json.dumps({"tanggal": hari_ini, "saham": {v["kode"]: snapshot_ringkas(v) for v in semua.values()}},
-                            ensure_ascii=False, indent=1), encoding="utf-8")
-    riwayat = FOLDER_HASIL / "riwayat.csv"
-    baru = not riwayat.exists()
-    # Hapus baris tanggal yang sama agar menjalankan ulang di hari yang sama tidak dobel
-    baris_lama = []
-    if not baru:
-        with riwayat.open(encoding="utf-8") as fh:
-            baris_lama = [r for r in csv.DictReader(fh) if r["tanggal"] != hari_ini]
-    kolom = ["tanggal", "kode", "harga", "skor_total", "skor_fundamental", "skor_dividen", "skor_tren", "rekomendasi"]
-    with riwayat.open("w", newline="", encoding="utf-8") as fh:
-        w = csv.DictWriter(fh, fieldnames=kolom)
-        w.writeheader()
-        w.writerows(baris_lama)
-        for h in semua.values():
-            s = h["skor"]
-            w.writerow({"tanggal": hari_ini, "kode": h["kode"], "harga": round(h["harga"], 2),
-                        "skor_total": s["total"], "skor_fundamental": s["fundamental"],
-                        "skor_dividen": s["dividen"], "skor_tren": s["tren"], "rekomendasi": h["rekomendasi"]})
-    return p
+def summary_text(a: dict) -> str:
+    parts = [f"**{a['name']} ({a['code']})** bergerak di sektor {a['sector']} / {a['industry']}."]
+    fs = a["fund_score"]
+    if fs is not None:
+        lvl = "kuat" if fs >= 65 else "cukup" if fs >= 45 else "lemah"
+        parts.append(f"Fundamental keuangan tergolong **{lvl}** (skor {fs:.0f}/100) dengan ROE {fmt_pct(a['roe'])} "
+                     f"dan margin laba bersih {fmt_pct(a['npm'])}.")
+    if a["val_score"] is not None:
+        lvl = "murah" if a["val_score"] >= 65 else "wajar" if a["val_score"] >= 40 else "mahal"
+        parts.append(f"Valuasi relatif **{lvl}** (PER {fmt_num(a['pe'], 1)}x, PBV {fmt_num(a['pbv'])}x).")
+    parts.append(f"Dividend yield 12 bulan terakhir {fmt_pct(a['div_yield'], 2)}, "
+                 f"dibagikan {a['years_paid']} dari 5 tahun terakhir.")
+    parts.append(f"Tren tahunan: **{a['yearly_trend']}** (1 tahun {fmt_pct(a['r1y'])}); "
+                 f"tren bulanan: **{a['monthly_trend']}** (1 bulan {fmt_pct(a['r1m'])}).")
+    if a["total"] is not None:
+        parts.append(f"Skor total **{a['total']:.0f}/100** → rekomendasi sistem: **{a['reco']}**.")
+    return " ".join(parts)
 
 
 # ---------------------------------------------------------------------------
-# 8. LAPORAN HTML
+# Tampilan
 # ---------------------------------------------------------------------------
-def fmt(v, des=0, sat=""):
-    """Format angka gaya Indonesia: 1.234,5"""
-    if v is None:
+RECO_COLOR = {"BELI": "#1a9850", "TAHAN": "#f39c12", "JUAL": "#d73027", "DATA KURANG": "#7f8c8d"}
+
+
+def penilaian(skor) -> str:
+    if skor is None or pd.isna(skor):
         return "–"
-    s = f"{v:,.{des}f}".replace(",", "_").replace(".", ",").replace("_", ".")
-    return s + sat
+    return "👍 baik" if skor >= 70 else "😐 sedang" if skor >= 40 else "👎 lemah"
 
 
-def fmt_besar(v):
-    if v is None:
-        return "–"
-    for batas, sat in ((1e12, " T"), (1e9, " M"), (1e6, " Jt")):
-        if abs(v) >= batas:
-            return "Rp" + fmt(v / batas, 1) + sat
-    return "Rp" + fmt(v)
+def score_badge(label: str, score: float | None, help: str | None = None) -> None:
+    val = "–" if score is None else f"{score:.0f}"
+    st.metric(label, f"{val} / 100", help=help)
+    if score is not None:
+        st.progress(int(round(score)) / 100)
 
 
-def fmt_pct(v, des=1, tanda=False):
-    if v is None:
-        return "–"
-    return ("+" if tanda and v > 0 else "") + fmt(v, des) + "%"
-
-
-class Catatan:
-    """Memberi nomor catatan kaki untuk tiap istilah yang muncul."""
-
-    def __init__(self):
-        self.urut: list[str] = []
-
-    def __call__(self, nama: str, label: str | None = None) -> str:
-        if nama not in ISTILAH:
-            return html.escape(label or nama)
-        if nama not in self.urut:
-            self.urut.append(nama)
-        no = self.urut.index(nama) + 1
-        return (f'<span class="term" title="{html.escape(ISTILAH[nama])}">{html.escape(label or nama)}'
-                f'<sup><a href="#cat-{no}">{no}</a></sup></span>')
-
-
-BADGE = {"BELI": ("good", "▲"), "TAHAN": ("warn", "■"), "JUAL": ("crit", "▼")}
-
-
-def badge(rek: str) -> str:
-    kls, ikon = BADGE[rek]
-    return f'<span class="badge {kls}">{ikon} {rek}</span>'
-
-
-def bar_skor(nama, v):
-    return (f'<div class="skor"><span>{nama}</span><div class="track"><div class="fill" style="width:{v}%"></div>'
-            f'</div><b>{v}</b></div>')
-
-
-def baris_metrik(cat, nama, v, teks, h, label=None):
-    return (f"<tr><th>{cat(nama, label)}</th><td class='num'>{teks}</td>"
-            f"<td class='tafsir'>{html.escape(tafsir(nama, v, h))}</td></tr>")
-
-
-def grafik_harga(h: dict, idx: int) -> str:
-    g = h["grafik"]
-    W, H, pl, pr, pt, pb = 640, 220, 52, 12, 10, 24
-    semua = [v for k in ("harga", "ma20", "ma50", "ma200") for v in g[k] if v is not None]
-    lo, hi = min(semua), max(semua)
-    pad = (hi - lo) * 0.05 or 1
-    lo, hi = lo - pad, hi + pad
-    n = len(g["harga"])
-
-    def x(i):
-        return pl + i * (W - pl - pr) / max(1, n - 1)
-
-    def y(v):
-        return pt + (hi - v) * (H - pt - pb) / (hi - lo)
-
-    def path(seri):
-        d, mulai = [], True
-        for i, v in enumerate(seri):
-            if v is None:
-                mulai = True
-                continue
-            d.append(f"{'M' if mulai else 'L'}{x(i):.1f},{y(v):.1f}")
-            mulai = False
-        return " ".join(d)
-
-    grid = []
-    for k in range(5):
-        v = lo + (hi - lo) * k / 4
-        grid.append(f'<line class="grid" x1="{pl}" x2="{W - pr}" y1="{y(v):.1f}" y2="{y(v):.1f}"/>'
-                    f'<text class="axis" x="{pl - 6}" y="{y(v) + 4:.1f}" text-anchor="end">{fmt(v)}</text>')
-    bulan_terakhir = None
-    for i, t in enumerate(g["tanggal"]):
-        b = t[:7]
-        if b != bulan_terakhir and i > 0 and int(t[5:7]) % 3 == 1:
-            grid.append(f'<text class="axis" x="{x(i):.1f}" y="{H - 6}" text-anchor="middle">'
-                        f'{dt.date.fromisoformat(t).strftime("%b %y")}</text>')
-        bulan_terakhir = b
-    # Urutan gambar: MA200 paling bawah, harga paling atas
-    garis = "".join(f'<path class="ln s{j}" d="{path(g[k])}"/>' for j, k in
-                    ((4, "ma200"), (3, "ma50"), (2, "ma20"), (1, "harga")))
-    data = html.escape(json.dumps(g, separators=(",", ":")))
-    return (f'<div class="chart" data-g="{data}" data-lo="{lo}" data-hi="{hi}">'
-            f'<svg viewBox="0 0 {W} {H}" role="img" aria-label="Grafik harga 1 tahun {h["kode"]} dengan MA20, MA50, MA200">'
-            f'{"".join(grid)}{garis}<line class="cross" x1="0" x2="0" y1="{pt}" y2="{H - pb}" visibility="hidden"/>'
-            f'<rect class="hit" x="{pl}" y="{pt}" width="{W - pl - pr}" height="{H - pt - pb}"/></svg>'
-            f'<div class="tip" hidden></div></div>')
-
-
-def grafik_bulanan(h: dict) -> str:
-    data = h["teknikal"]["bulanan"]
-    if not data:
-        return ""
-    W, H, pt, pb = 640, 130, 14, 22
-    vals = list(data.values())
-    m = max(abs(v) for v in vals) or 1
-    nol = pt + (H - pt - pb) / 2
-    lebar = (W - 20) / len(vals)
-    batang = []
-    for i, (bln, v) in enumerate(data.items()):
-        tinggi = abs(v) / m * (H - pt - pb) / 2
-        yy = nol - tinggi if v >= 0 else nol
-        kls = "pos" if v >= 0 else "neg"
-        cx = 10 + i * lebar
-        batang.append(
-            f'<g class="bar"><title>{bln}: {fmt_pct(v, 1, True)}</title>'
-            f'<rect class="hitbar" x="{cx:.1f}" y="{pt}" width="{lebar:.1f}" height="{H - pt - pb}"/>'
-            f'<rect class="{kls}" x="{cx + 3:.1f}" y="{yy:.1f}" width="{lebar - 6:.1f}" height="{max(tinggi, 1):.1f}" rx="2"/>'
-            f'<text class="axis" x="{cx + lebar / 2:.1f}" y="{H - 6}" text-anchor="middle">{bln[:3]}</text></g>')
-    return (f'<svg class="bulanan" viewBox="0 0 {W} {H}" role="img" aria-label="Return bulanan 12 bulan">'
-            f'<line class="zero" x1="10" x2="{W - 10}" y1="{nol}" y2="{nol}"/>{"".join(batang)}</svg>')
-
-
-def tabel_pembanding(h: dict, semua: dict, cat) -> str:
-    peers = [p for p in h.get("pembanding", []) if p in semua]
-    if not peers:
-        return "<p class='muted'>Belum ada saham pembanding untuk kode ini. Tambahkan di KELOMPOK dalam script, atau pakai opsi --pembanding.</p>"
-    baris = []
-    lebih_baik = []
-    for s in [h["simbol"]] + peers:
-        p = semua[s]
-        f, d, t = p["fundamental"], p["dividen"], p["teknikal"]
-        utama = s == h["simbol"]
-        tanda = ""
-        if not utama and p["skor"]["total"] > h["skor"]["total"]:
-            tanda = ' <span class="star" title="Skor total lebih tinggi">★ lebih baik</span>'
-            lebih_baik.append(p["kode"])
-        baris.append(
-            f"<tr class='{'utama' if utama else ''}'><th>{p['kode']}{tanda}</th>"
-            f"<td class='num'>{fmt(f['PER'], 1)}</td><td class='num'>{fmt(f['PBV'], 2)}</td>"
-            f"<td class='num'>{fmt_pct(f['ROE'])}</td><td class='num'>{fmt_pct(d['Dividend Yield'])}</td>"
-            f"<td class='num'>{fmt_pct(t['Return 1 Th'], 1, True)}</td><td>{html.escape(t['tren'])}</td>"
-            f"<td class='num'><b>{p['skor']['total']}</b></td><td>{badge(p['rekomendasi'])}</td></tr>")
-    ringkas = (f"<p>Alternatif dengan skor lebih tinggi: <b>{', '.join(lebih_baik)}</b>. Pelajari kenapa — "
-               f"apakah karena valuasi lebih murah, ROE lebih tinggi, atau trennya lebih kuat?</p>"
-               if lebih_baik else f"<p><b>{h['kode']}</b> memiliki skor tertinggi di antara pembandingnya.</p>")
-    return (f"<div class='scroll'><table class='banding'><thead><tr><th>Kode</th><th>{cat('PER')}</th><th>{cat('PBV')}</th>"
-            f"<th>{cat('ROE')}</th><th>{cat('Dividend Yield', 'Yield')}</th><th>{cat('Return', 'Return 1Th')}</th>"
-            f"<th>Tren</th><th>{cat('Skor')}</th><th>{cat('Rekomendasi', 'Rek.')}</th></tr></thead>"
-            f"<tbody>{''.join(baris)}</tbody></table></div>{ringkas}")
-
-
-def kartu(h: dict, semua: dict, lama: dict | None, cat, idx: int) -> str:
-    f, d, t, s = h["fundamental"], h["dividen"], h["teknikal"], h["skor"]
-    perubahan = ""
-    if lama:
-        dh = (h["harga"] / lama["harga"] - 1) * 100
-        ds = s["total"] - lama["skor"]["total"]
-        rek_ubah = (f" · rekomendasi <b>{lama['rekomendasi']} → {h['rekomendasi']}</b>"
-                    if lama["rekomendasi"] != h["rekomendasi"] else "")
-        perubahan = (f"<div class='delta'>Sejak resume sebelumnya: harga {fmt_pct(dh, 1, True)}, "
-                     f"skor {'+' if ds > 0 else ''}{ds}{rek_ubah}</div>")
-
-    fund_rows = "".join([
-        baris_metrik(cat, "EPS", f["EPS"], "Rp" + fmt(f["EPS"], 1) if f["EPS"] is not None else "–", h),
-        baris_metrik(cat, "PER", f["PER"], fmt(f["PER"], 1, "×"), h),
-        baris_metrik(cat, "PBV", f["PBV"], fmt(f["PBV"], 2, "×"), h),
-        baris_metrik(cat, "ROE", f["ROE"], fmt_pct(f["ROE"]), h),
-        baris_metrik(cat, "NPM", f["NPM"], fmt_pct(f["NPM"]), h),
-        baris_metrik(cat, "DER", f["DER"], fmt(f["DER"], 2, "×"), h),
-        baris_metrik(cat, "Pertumbuhan Laba", f["Pertumbuhan Laba"], fmt_pct(f["Pertumbuhan Laba"], 1, True), h),
-        baris_metrik(cat, "Pertumbuhan Pendapatan", f["Pertumbuhan Pendapatan"], fmt_pct(f["Pertumbuhan Pendapatan"], 1, True), h),
-        baris_metrik(cat, "Current Ratio", f["Current Ratio"], fmt(f["Current Ratio"], 2, "×"), h),
-    ])
-    div_rows = "".join([
-        baris_metrik(cat, "Dividend Yield", d["Dividend Yield"], fmt_pct(d["Dividend Yield"], 2), h),
-        f"<tr><th>Dividen 12 bln</th><td class='num'>Rp{fmt(d['div12'], 1)}</td><td class='tafsir'>per lembar</td></tr>",
-        baris_metrik(cat, "Yield Rata-rata 5 Th", d["Yield Rata-rata 5 Th"], fmt_pct(d["Yield Rata-rata 5 Th"], 2), h),
-        baris_metrik(cat, "Payout Ratio", d["Payout Ratio"], fmt_pct(d["Payout Ratio"], 0), h),
-        baris_metrik(cat, "Konsistensi Dividen", d["Konsistensi Dividen"], f"{d['Konsistensi Dividen']} dari 5 th", h),
-    ])
-    tek_rows = "".join([
-        baris_metrik(cat, "MA20", t["MA20"], fmt(t["MA20"]), h),
-        baris_metrik(cat, "MA50", t["MA50"], fmt(t["MA50"]), h),
-        baris_metrik(cat, "MA200", t["MA200"], fmt(t["MA200"]), h),
-        baris_metrik(cat, "RSI", t["RSI"], fmt(t["RSI"], 0), h),
-    ])
-    if t["cross"]:
-        tek_rows += (f"<tr><th>{cat(t['cross'][0])}</th><td class='num'>{t['cross'][1]}</td>"
-                     f"<td class='tafsir'>terjadi dalam 3 bulan terakhir</td></tr>")
-    periode = [("1 Bln", "Return 1 Bln"), ("3 Bln", "Return 3 Bln"), ("6 Bln", "Return 6 Bln"),
-               ("1 Th", "Return 1 Th"), (cat("YTD"), "YTD")]
-    ret_html = "".join(f"<div class='ret'><span>{lbl}</span><b class='{'up' if (t[k] or 0) >= 0 else 'down'}'>"
-                       f"{fmt_pct(t[k], 1, True)}</b></div>" for lbl, k in periode)
-    tahunan = "".join(f"<div class='ret'><span>{th}</span><b class='{'up' if v >= 0 else 'down'}'>{fmt_pct(v, 1, True)}</b></div>"
-                      for th, v in t["tahunan"].items())
-    plus = "".join(f"<li class='plus'>✓ {html.escape(a)}</li>" for a in h["alasan_plus"]) or ""
-    minus = "".join(f"<li class='minus'>✕ {html.escape(a)}</li>" for a in h["alasan_min"]) or ""
-    grup = f" · kelompok {h['kelompok']}" if h.get("kelompok") else ""
-
-    return f"""
-<section class="card" id="{h['kode']}">
-  <header>
-    <div><h2>{h['kode']} <small>{html.escape(h['nama'])}</small></h2>
-      <p class="muted">{html.escape(h['sektor'])} / {html.escape(h['industri'])}{grup} · data per {h['tanggal_data']}</p></div>
-    <div class="harga"><b>Rp{fmt(h['harga'])}</b><span class="muted">{cat('Kapitalisasi')} {fmt_besar(h['kapitalisasi'])}</span></div>
-  </header>
-  {perubahan}
-  <div class="ringkas">
-    <div class="rek">{badge(h['rekomendasi'])}<div class="total">{s['total']}<small>/100</small></div>
-      <span class="muted">{cat('Skor', 'skor total')}</span></div>
-    <div class="skor-wrap">{bar_skor('Fundamental (50%)', s['fundamental'])}{bar_skor('Dividen (20%)', s['dividen'])}{bar_skor('Tren (30%)', s['tren'])}</div>
-    <ul class="alasan">{plus}{minus}</ul>
-  </div>
-  <div class="grid3">
-    <div><h3>1 · Fundamental</h3><table class="m">{fund_rows}</table></div>
-    <div><h3>2 · Dividen</h3><table class="m">{div_rows}</table></div>
-    <div><h3>3 · Tren — <span class="tren">{html.escape(t['tren'])}</span></h3><table class="m">{tek_rows}</table>
-      <div class="rets">{ret_html}</div></div>
-  </div>
-  <h3>Harga 1 tahun &amp; moving average</h3>
-  <div class="legend"><span><i class="k s1"></i>Harga</span><span><i class="k s2"></i>{cat('MA20')}</span>
-    <span><i class="k s3"></i>{cat('MA50')}</span><span><i class="k s4"></i>{cat('MA200')}</span></div>
-  {grafik_harga(h, idx)}
-  <div class="grid2">
-    <div><h3>{cat('Return', 'Return')} bulanan (12 bln)</h3>{grafik_bulanan(h)}</div>
-    <div><h3>{cat('Return', 'Return')} tahunan</h3><div class="rets">{tahunan}</div>
-      <p class="muted kecil">Tahun berjalan = sejak awal tahun sampai hari ini.</p></div>
-  </div>
-  <h3>4 · Pembanding sejenis</h3>
-  {tabel_pembanding(h, semua, cat)}
-</section>"""
-
-
-CSS = """
-:root{--surface:#fcfcfb;--card:#ffffff;--text:#0b0b0b;--text2:#52514e;--muted:#7a7974;--line:#e4e3df;
---s1:#2a78d6;--s2:#eb6834;--s3:#1baf7a;--s4:#eda100;--pos:#2a78d6;--neg:#e34948;--good:#0ca30c;--warn:#fab219;--crit:#d03b3b;--track:#f0efec}
-@media (prefers-color-scheme:dark){:root{--surface:#1a1a19;--card:#222220;--text:#f0efec;--text2:#c3c2b7;--muted:#9b9a92;--line:#383835;
---s1:#3987e5;--s2:#d95926;--s3:#199e70;--s4:#c98500;--pos:#3987e5;--neg:#e66767;--track:#383835}}
-*{box-sizing:border-box}body{margin:0;background:var(--surface);color:var(--text);font:15px/1.5 -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif}
-main{max-width:1100px;margin:auto;padding:24px 16px 60px}h1{margin:0 0 4px;font-size:26px}h2{margin:0;font-size:22px}h2 small{font-weight:400;color:var(--text2);font-size:15px}
-h3{font-size:14px;text-transform:uppercase;letter-spacing:.04em;color:var(--text2);margin:22px 0 8px}
-.muted{color:var(--muted)}.kecil{font-size:13px}a{color:var(--s1)}
-.card{background:var(--card);border:1px solid var(--line);border-radius:14px;padding:20px;margin:22px 0}
-.card header{display:flex;justify-content:space-between;gap:16px;flex-wrap:wrap}.card header p{margin:2px 0 0}
-.harga{text-align:right;display:flex;flex-direction:column}.harga b{font-size:24px}
-.delta{margin-top:12px;padding:8px 12px;border-radius:8px;background:var(--track);font-size:14px}
-.ringkas{display:grid;grid-template-columns:150px 1fr 1fr;gap:20px;align-items:center;margin-top:16px}
-.rek{text-align:center}.total{font-size:40px;font-weight:700;line-height:1.1;margin-top:6px}.total small{font-size:15px;color:var(--muted)}
-.badge{display:inline-block;padding:4px 12px;border-radius:999px;font-weight:700;font-size:14px;border:2px solid}
-.badge.good{color:var(--good);border-color:var(--good)}.badge.warn{color:#9a6a00;border-color:var(--warn)}.badge.crit{color:var(--crit);border-color:var(--crit)}
-@media (prefers-color-scheme:dark){.badge.warn{color:var(--warn)}}
-.skor{display:grid;grid-template-columns:150px 1fr 32px;gap:8px;align-items:center;font-size:14px;margin:6px 0}
-.track{height:8px;background:var(--track);border-radius:4px;overflow:hidden}.fill{height:100%;background:var(--s1);border-radius:4px}
-.alasan{list-style:none;margin:0;padding:0;font-size:14px}.alasan li{margin:3px 0}.plus{color:var(--text)}.plus::first-letter{color:var(--good)}.minus::first-letter{color:var(--crit)}
-.grid3{display:grid;grid-template-columns:repeat(3,1fr);gap:20px}.grid2{display:grid;grid-template-columns:1.4fr 1fr;gap:20px}
-table{border-collapse:collapse;width:100%;font-size:14px}table.m th{text-align:left;font-weight:500;color:var(--text2);padding:5px 6px 5px 0;white-space:nowrap}
-table.m td{padding:5px 6px;border-top:1px solid var(--line)}table.m th{border-top:1px solid var(--line)}
-.num{text-align:right;font-variant-numeric:tabular-nums;white-space:nowrap}.tafsir{color:var(--muted);font-size:12.5px}
-.term{border-bottom:1px dotted var(--muted);cursor:help}.term sup a{text-decoration:none;font-size:10px;margin-left:1px}
-.rets{display:flex;flex-wrap:wrap;gap:8px;margin-top:10px}.ret{background:var(--track);border-radius:8px;padding:6px 10px;display:flex;flex-direction:column;min-width:70px}
-.ret span{font-size:12px;color:var(--text2)}.up{color:var(--text)}.up::before{content:"▲ ";color:var(--pos);font-size:10px}.down::before{content:"▼ ";color:var(--neg);font-size:10px}
-.tren{color:var(--text);text-transform:none;letter-spacing:0}
-.legend{display:flex;gap:16px;font-size:13px;color:var(--text2);flex-wrap:wrap}.k{display:inline-block;width:14px;height:3px;border-radius:2px;vertical-align:middle;margin-right:6px}
-.k.s1{background:var(--s1);height:4px}.k.s2{background:var(--s2)}.k.s3{background:var(--s3)}.k.s4{background:var(--s4)}
-.chart{position:relative}svg{width:100%;height:auto;display:block}.grid{stroke:var(--line);stroke-width:1}.axis{fill:var(--muted);font-size:11px}
-.ln{fill:none;stroke-width:1.5}.ln.s1{stroke:var(--s1);stroke-width:2}.ln.s2{stroke:var(--s2)}.ln.s3{stroke:var(--s3)}.ln.s4{stroke:var(--s4)}
-.cross{stroke:var(--muted);stroke-dasharray:3 3}.hit{fill:transparent;cursor:crosshair}
-.tip{position:absolute;top:0;pointer-events:none;background:var(--card);border:1px solid var(--line);border-radius:8px;padding:6px 10px;font-size:12.5px;box-shadow:0 4px 14px rgba(0,0,0,.12);white-space:nowrap}
-.tip i{display:inline-block;width:10px;height:3px;margin-right:6px;vertical-align:middle}
-.bulanan .pos{fill:var(--pos)}.bulanan .neg{fill:var(--neg)}.zero{stroke:var(--muted)}.hitbar{fill:transparent}.bar:hover .hitbar{fill:var(--track)}
-.scroll{overflow-x:auto}table.banding th,table.banding td{padding:7px 8px;border-bottom:1px solid var(--line);text-align:left;white-space:nowrap}
-table.banding thead th{color:var(--text2);font-weight:500;font-size:13px}table.banding tr.utama{background:var(--track)}
-.star{color:var(--text);font-size:12px;font-weight:600;background:var(--track);border-radius:6px;padding:1px 6px}
-.ringkasan-tbl td,.ringkasan-tbl th{padding:8px;border-bottom:1px solid var(--line);text-align:left;white-space:nowrap}
-.disclaimer{border-left:4px solid var(--warn);padding:10px 14px;background:var(--card);border-radius:6px;font-size:14px}
-ol.catatan li{margin:6px 0}ol.catatan b{display:inline-block;min-width:150px}
-@media (max-width:820px){.grid3,.grid2,.ringkas{grid-template-columns:1fr}.harga{text-align:left}}
-"""
-
-JS = """
-document.querySelectorAll('.chart').forEach(function(el){
-  var g=JSON.parse(el.dataset.g), lo=+el.dataset.lo, hi=+el.dataset.hi;
-  var svg=el.querySelector('svg'), hit=el.querySelector('.hit'), cr=el.querySelector('.cross'), tip=el.querySelector('.tip');
-  var vb=svg.viewBox.baseVal, x0=+hit.getAttribute('x'), w=+hit.getAttribute('width'), n=g.harga.length;
-  var f=function(v){return v==null?'–':Math.round(v).toLocaleString('id-ID')};
-  function show(ev){
-    var r=svg.getBoundingClientRect(), px=(ev.clientX-r.left)*vb.width/r.width;
-    var i=Math.max(0,Math.min(n-1,Math.round((px-x0)/w*(n-1)))), xx=x0+i*w/(n-1);
-    cr.setAttribute('x1',xx);cr.setAttribute('x2',xx);cr.setAttribute('visibility','visible');
-    tip.innerHTML='<b>'+g.tanggal[i]+'</b><br><i style="background:var(--s1)"></i>Harga '+f(g.harga[i])+
-      '<br><i style="background:var(--s2)"></i>MA20 '+f(g.ma20[i])+'<br><i style="background:var(--s3)"></i>MA50 '+f(g.ma50[i])+
-      '<br><i style="background:var(--s4)"></i>MA200 '+f(g.ma200[i]);
-    tip.hidden=false; var left=xx*r.width/vb.width; tip.style.left=(left>r.width*0.6?left-tip.offsetWidth-12:left+12)+'px';
-  }
-  hit.addEventListener('pointermove',show);hit.addEventListener('pointerdown',show);
-  hit.addEventListener('pointerleave',function(){tip.hidden=true;cr.setAttribute('visibility','hidden')});
-});
-"""
-
-
-def buat_laporan(utama: list[str], semua: dict, hari_ini: str, lama: tuple[str, dict] | None, demo: bool) -> str:
-    cat = Catatan()
-    lama_saham = lama[1] if lama else {}
-    kartu_html = "".join(kartu(semua[s], semua, lama_saham.get(semua[s]["kode"]), cat, i) for i, s in enumerate(utama))
-
-    # Tabel ringkasan di atas
-    baris = []
-    for s in sorted(utama, key=lambda k: -semua[k]["skor"]["total"]):
-        h = semua[s]
-        l = lama_saham.get(h["kode"])
-        ubah = "baru"
-        if l:
-            ubah = f"{fmt_pct((h['harga'] / l['harga'] - 1) * 100, 1, True)} · skor {h['skor']['total'] - l['skor']['total']:+d}"
-            if l["rekomendasi"] != h["rekomendasi"]:
-                ubah += f" · {l['rekomendasi']}→{h['rekomendasi']}"
-        baris.append(f"<tr><th><a href='#{h['kode']}'>{h['kode']}</a></th><td class='num'>Rp{fmt(h['harga'])}</td>"
-                     f"<td class='num'>{h['skor']['fundamental']}</td><td class='num'>{h['skor']['dividen']}</td>"
-                     f"<td class='num'>{h['skor']['tren']}</td><td class='num'><b>{h['skor']['total']}</b></td>"
-                     f"<td>{badge(h['rekomendasi'])}</td><td class='muted'>{ubah if lama else '–'}</td></tr>")
-    info_update = (f"Dibandingkan dengan resume sebelumnya tanggal <b>{lama[0]}</b>." if lama
-                   else "Ini resume pertama — jalankan lagi nanti untuk melihat perubahannya.")
-    catatan = "".join(f"<li id='cat-{i + 1}'><b>{html.escape(n)}</b> {html.escape(ISTILAH[n])}</li>"
-                      for i, n in enumerate(cat.urut))
-    demo_note = ("<p class='disclaimer'><b>MODE DEMO</b> — semua angka di laporan ini karangan, hanya untuk mencoba tampilan. "
-                 "Jalankan tanpa <code>--demo</code> untuk data asli.</p>") if demo else ""
-
-    return f"""<!DOCTYPE html><html lang="id"><head><meta charset="utf-8">
-<meta name="viewport" content="width=device-width,initial-scale=1"><title>Resume Saham {hari_ini}</title>
-<style>{CSS}</style></head><body><main>
-<h1>Resume Saham</h1><p class="muted">Dibuat {hari_ini} · {info_update}</p>
-{demo_note}
-<div class="scroll"><table class="ringkasan-tbl"><thead><tr><th>Kode</th><th>Harga</th><th>Fundamental</th><th>Dividen</th>
-<th>Tren</th><th>{cat('Skor', 'Total')}</th><th>{cat('Rekomendasi')}</th><th>Perubahan</th></tr></thead><tbody>{''.join(baris)}</tbody></table></div>
-{kartu_html}
-<section class="card"><h2>Cara skor dihitung</h2>
-<p><b>Fundamental (50%)</b> — poin dari ROE, NPM, DER (bank dikecualikan), PER, PBV, dan pertumbuhan laba.
-<b>Dividen (20%)</b> — dari dividend yield, dikalikan faktor konsistensi 5 tahun, dikurangi jika payout &gt; 100%.
-<b>Tren (30%)</b> — mulai 50, naik/turun berdasarkan posisi harga terhadap MA20/MA50/MA200, posisi MA50 vs MA200, RSI, dan return 1 tahun.</p>
-<p>Semua aturan ada di fungsi <code>beri_skor()</code> dalam script dan boleh diubah sesuai pemahaman Anda.</p></section>
-<section class="card"><h2>Catatan kaki — kamus istilah</h2><p class="muted kecil">Arahkan kursor / ketuk istilah bergaris titik untuk penjelasan cepat, atau klik nomornya.</p>
-<ol class="catatan">{catatan}</ol></section>
-<p class="disclaimer"><b>Disclaimer:</b> laporan ini dibuat otomatis untuk tujuan belajar. Data dari Yahoo Finance bisa terlambat atau
-tidak lengkap. Rekomendasi berasal dari aturan sederhana, bukan nasihat investasi — selalu cek laporan keuangan resmi (idx.co.id) sebelum memutuskan.</p>
-</main><script>{JS}</script></body></html>"""
+def price_chart(a: dict, period_days: int) -> go.Figure:
+    start = a["close"].index[-1] - timedelta(days=period_days)
+    h = a["hist"][a["hist"].index >= start]
+    fig = go.Figure()
+    fig.add_trace(go.Candlestick(x=h.index, open=h["Open"], high=h["High"], low=h["Low"], close=h["Close"],
+                                 name="Harga (candle harian)", increasing_line_color=HIJAU, decreasing_line_color=MERAH))
+    for col, name, color in [("ma20", "MA20", "#3498db"), ("ma50", "MA50", "#9b59b6"), ("ma200", "MA200", "#e67e22")]:
+        s = a[col][a[col].index >= start]
+        fig.add_trace(go.Scatter(x=s.index, y=s, name=name, line=dict(width=1.4, color=color)))
+    fig.update_layout(height=420, margin=dict(l=10, r=10, t=30, b=10), xaxis_rangeslider_visible=False,
+                      legend=dict(orientation="h", y=1.08))
+    return fig
 
 
 # ---------------------------------------------------------------------------
-# 9. PROGRAM UTAMA
+# Panduan membaca grafik candle
 # ---------------------------------------------------------------------------
-def baca_watchlist() -> list[str]:
-    if not FILE_WATCHLIST.exists():
-        FILE_WATCHLIST.write_text("# Satu kode per baris. Baris diawali # diabaikan.\nBBCA\nTLKM\nADRO\n", encoding="utf-8")
-    return [b.strip() for b in FILE_WATCHLIST.read_text(encoding="utf-8").splitlines()
-            if b.strip() and not b.strip().startswith("#")]
+HIJAU, MERAH = "#1a9850", "#d73027"
 
 
-def main():
-    ap = argparse.ArgumentParser(description="Resume saham: fundamental, dividen, tren, rekomendasi, pembanding.")
-    ap.add_argument("kode", nargs="*", help="kode saham, mis. BBCA TLKM (kosong = pakai watchlist.txt)")
-    ap.add_argument("--pembanding", help="kode pembanding manual, pisahkan koma: BBRI,BMRI")
-    ap.add_argument("--tanpa-pembanding", action="store_true", help="lewati perbandingan (lebih cepat)")
-    ap.add_argument("--bandingkan", help="tanggal (YYYY-MM-DD) atau file snapshot lama yang ingin dibandingkan")
-    ap.add_argument("--demo", action="store_true", help="pakai data karangan (tanpa internet)")
-    ap.add_argument("--tanggal", help=argparse.SUPPRESS)  # untuk uji coba mode demo
-    ap.add_argument("--jangan-buka", action="store_true", help="jangan otomatis membuka laporan di browser")
-    a = ap.parse_args()
+def candle_anatomy_chart() -> go.Figure:
+    """Gambar 2 candle (naik & turun) dengan label bagian-bagiannya."""
+    naik, turun = "Candle NAIK (hijau)", "Candle TURUN (merah)"
+    fig = go.Figure(go.Candlestick(
+        x=[naik, turun], open=[100, 140], high=[155, 155], low=[85, 85], close=[140, 100],
+        increasing_line_color=HIJAU, decreasing_line_color=MERAH, showlegend=False, hoverinfo="skip"))
+    label = [
+        (naik, 155, "<b>High</b> — harga tertinggi hari itu", -1),
+        (naik, 147, "Sumbu atas (upper shadow / wick)", -1),
+        (naik, 140, "<b>Close</b> — harga penutupan (di ATAS)", -1),
+        (naik, 120, "<b>Badan (body)</b> — jarak Open↔Close", -1),
+        (naik, 100, "<b>Open</b> — harga pembukaan (di BAWAH)", -1),
+        (naik, 85, "<b>Low</b> — harga terendah hari itu", -1),
+        (turun, 140, "<b>Open</b> — pembukaan (di ATAS)", 1),
+        (turun, 120, "Badan merah = harga turun", 1),
+        (turun, 100, "<b>Close</b> — penutupan (di BAWAH)", 1),
+        (turun, 92, "Sumbu bawah (lower shadow)", 1),
+    ]
+    for x, y, teks, sisi in label:
+        fig.add_annotation(x=x, y=y, text=teks, showarrow=True, arrowhead=2, arrowwidth=1,
+                           ax=150 * sisi, ay=0,
+                           xanchor="left" if sisi > 0 else "right", font=dict(size=12))
+    fig.update_layout(height=380, margin=dict(l=10, r=10, t=10, b=10), xaxis_rangeslider_visible=False,
+                      yaxis=dict(visible=False, range=[75, 165]), xaxis=dict(fixedrange=True),
+                      dragmode=False)
+    return fig
 
-    hari = dt.date.fromisoformat(a.tanggal) if a.tanggal else dt.date.today()
-    hari_ini = hari.isoformat()
-    utama = [normalisasi_kode(k) for k in (a.kode or baca_watchlist())]
-    manual = [normalisasi_kode(k) for k in a.pembanding.split(",")] if a.pembanding else None
 
-    semua, gagal = {}, []
+POLA_CANDLE = [
+    # nama, OHLC (bisa 2 candle), arti
+    ("Doji", [(100, 112, 88, 100.5)],
+     "Open ≈ Close, badan sangat tipis. Pembeli & penjual seimbang → pasar ragu-ragu. "
+     "Setelah tren panjang, bisa menandakan tren melemah."),
+    ("Hammer", [(108, 111, 80, 110)],
+     "Badan kecil di atas, sumbu bawah panjang (≥ 2× badan). Harga sempat jatuh, lalu pembeli mendorong naik lagi. "
+     "Jika muncul setelah penurunan → potensi berbalik naik."),
+    ("Shooting star", [(92, 120, 89, 90)],
+     "Kebalikan hammer: badan kecil di bawah, sumbu atas panjang. Harga sempat naik tinggi lalu ditekan penjual. "
+     "Jika muncul setelah kenaikan → potensi berbalik turun."),
+    ("Marubozu", [(88, 112, 88, 112)],
+     "Badan penuh tanpa (atau hampir tanpa) sumbu. Satu pihak menguasai pasar sepanjang hari "
+     "(hijau = pembeli sangat kuat, merah = penjual sangat kuat)."),
+    ("Bullish engulfing", [(104, 106, 95, 97), (95, 112, 93, 110)],
+     "Candle hijau besar 'menelan' seluruh badan candle merah sebelumnya. Sinyal pembalikan naik, "
+     "terutama setelah penurunan. Kebalikannya: bearish engulfing."),
+]
 
-    def proses(simbol):
-        if simbol in semua:
-            return True
-        try:
-            print(f"  mengambil {simbol} ...", flush=True)
-            data = ambil_data_demo(simbol, hari) if a.demo else ambil_data_yahoo(simbol)
-            semua[simbol] = analisis(data)
-            return True
-        except Exception as e:  # lanjut ke saham lain
-            print(f"  ! gagal {simbol}: {e}")
-            gagal.append(simbol)
-            return False
 
-    print(f"Resume Saham {hari_ini}{' (DEMO)' if a.demo else ''}")
-    utama = [s for s in utama if proses(s)]
-    if not utama:
-        sys.exit("Tidak ada saham yang berhasil diambil. Cek koneksi internet / kode saham.")
-    if not a.tanpa_pembanding:
-        for s in utama:
-            grup, peers = cari_pembanding(s)
-            if manual:
-                peers = [p for p in manual if p != s]
-            semua[s]["kelompok"] = grup if not manual else "pilihan sendiri"
-            semua[s]["pembanding"] = [p for p in peers if proses(p)]
+def candle_patterns_chart() -> go.Figure:
+    xs, o, h, l, c = [], [], [], [], []
+    for nama, candles, _ in POLA_CANDLE:
+        for i, (co, ch, cl, cc) in enumerate(candles):
+            xs.append(nama if len(candles) == 1 else f"{nama} ({i + 1})")
+            o.append(co), h.append(ch), l.append(cl), c.append(cc)
+    fig = go.Figure(go.Candlestick(x=xs, open=o, high=h, low=l, close=c, showlegend=False,
+                                   increasing_line_color=HIJAU, decreasing_line_color=MERAH))
+    fig.update_layout(height=260, margin=dict(l=10, r=10, t=10, b=10), xaxis_rangeslider_visible=False,
+                      yaxis=dict(visible=False), xaxis=dict(fixedrange=True), dragmode=False)
+    return fig
 
-    lama = cari_snapshot_lama(hari_ini, a.bandingkan)
-    FOLDER_HASIL.mkdir(exist_ok=True)
-    laporan = FOLDER_HASIL / f"resume_{hari_ini}.html"
-    laporan.write_text(buat_laporan(utama, semua, hari_ini, lama, a.demo), encoding="utf-8")
-    (FOLDER_HASIL / "resume_terbaru.html").write_text(laporan.read_text(encoding="utf-8"), encoding="utf-8")
-    snap = simpan_snapshot(hari_ini, {s: semua[s] for s in semua})
 
-    print("\nRingkasan:")
-    for s in sorted(utama, key=lambda k: -semua[k]["skor"]["total"]):
-        h = semua[s]
-        print(f"  {h['kode']:<6} Rp{fmt(h['harga']):>9}  skor {h['skor']['total']:>3}  {h['rekomendasi']:<5}  {h['teknikal']['tren']}")
-    if lama:
-        print(f"\nDibandingkan dengan resume {lama[0]}.")
-    if gagal:
-        print(f"Gagal diambil: {', '.join(gagal)}")
-    print(f"\nLaporan : {laporan}\nSnapshot: {snap}")
-    if not a.jangan_buka:
-        webbrowser.open(laporan.as_uri())
+def baca_candle_terakhir(a: dict) -> list[str]:
+    """Membaca candle hari terakhir secara otomatis, dengan bahasa sederhana."""
+    h = a["hist"].dropna(subset=["Open", "High", "Low", "Close"])
+    if len(h) < 2:
+        return []
+    cur, prev = h.iloc[-1], h.iloc[-2]
+    o, hi, lo, c = (float(cur[k]) for k in ("Open", "High", "Low", "Close"))
+    rentang = hi - lo
+    badan = abs(c - o)
+    atas = hi - max(o, c)
+    bawah = min(o, c) - lo
+    cur_fmt = lambda v: fmt_price(v, a["currency"])  # noqa: E731
+    tgl = h.index[-1].strftime("%d %b %Y")
+    out = []
+    if c > o:
+        out.append(f"Candle **{tgl}** berwarna **hijau (naik)**: dibuka {cur_fmt(o)}, ditutup lebih tinggi di {cur_fmt(c)}.")
+    elif c < o:
+        out.append(f"Candle **{tgl}** berwarna **merah (turun)**: dibuka {cur_fmt(o)}, ditutup lebih rendah di {cur_fmt(c)}.")
+    else:
+        out.append(f"Candle **{tgl}**: harga ditutup sama dengan harga pembukaan ({cur_fmt(c)}).")
+    out.append(f"Rentang hari itu {cur_fmt(lo)} (Low) – {cur_fmt(hi)} (High).")
+
+    if rentang > 0:
+        r_badan = badan / rentang
+        if r_badan < 0.1:
+            out.append("Badannya sangat tipis → mirip **Doji**: pasar ragu-ragu, belum ada pemenang antara pembeli dan penjual.")
+        elif bawah >= 2 * badan and atas <= max(badan, rentang * 0.1):
+            out.append("Sumbu bawah panjang → mirip **Hammer**: harga sempat ditekan, tapi pembeli berhasil mendorongnya naik lagi.")
+        elif atas >= 2 * badan and bawah <= max(badan, rentang * 0.1):
+            out.append("Sumbu atas panjang → mirip **Shooting star**: harga sempat naik tinggi, tapi penjual menekannya turun lagi.")
+        elif r_badan >= 0.9:
+            out.append("Badannya hampir penuh tanpa sumbu → **Marubozu**: "
+                       + ("pembeli menguasai hari itu." if c > o else "penjual menguasai hari itu."))
+        po, pc = float(prev["Open"]), float(prev["Close"])
+        if pc < po and c > o and c >= po and o <= pc:
+            out.append("Candle hijau ini menelan candle merah sebelumnya → **Bullish engulfing** (sinyal pembalikan naik).")
+        elif pc > po and c < o and o >= pc and c <= po:
+            out.append("Candle merah ini menelan candle hijau sebelumnya → **Bearish engulfing** (sinyal pembalikan turun).")
+        rata2 = float((h["High"] - h["Low"]).tail(20).mean())
+        if rata2 > 0:
+            if rentang > 1.5 * rata2:
+                out.append("Rentangnya **lebih lebar** dari rata-rata 20 hari → pergerakan hari itu cukup bergejolak.")
+            elif rentang < 0.5 * rata2:
+                out.append("Rentangnya **lebih sempit** dari rata-rata 20 hari → pasar sedang tenang.")
+
+    posisi = []
+    for key, nama in (("ma20", "MA20"), ("ma50", "MA50"), ("ma200", "MA200")):
+        v = num(a[key].iloc[-1])
+        if v is not None:
+            posisi.append(f"{'di atas' if c > v else 'di bawah'} {nama}")
+    if posisi:
+        out.append("Harga penutupan berada " + ", ".join(posisi) + ".")
+    return out
+
+
+def bar_chart(series: pd.Series, title: str, pct: bool = True) -> go.Figure:
+    colors = ["#1a9850" if v >= 0 else "#d73027" for v in series.values]
+    y = series.values * 100 if pct else series.values
+    x = [str(i) if not isinstance(i, pd.Timestamp) else i.strftime("%b %Y") for i in series.index]
+    fig = go.Figure(go.Bar(x=x, y=y, marker_color=colors,
+                           text=[f"{v:.1f}%" if pct else fmt_num(v, 0) for v in y], textposition="outside"))
+    fig.update_layout(title=title, height=320, margin=dict(l=10, r=10, t=40, b=10),
+                      yaxis_title="%" if pct else None)
+    return fig
+
+
+def main() -> None:
+    st.set_page_config(page_title="Resume Saham", page_icon="📈", layout="wide")
+    st.title("📈 Resume Saham")
+    st.caption("Ringkasan fundamental, dividen, tren, dan rekomendasi — dibandingkan dengan saham sejenis. "
+               "Data: Yahoo Finance (bisa tertunda ±15 menit).")
+
+    with st.sidebar:
+        st.header("Pengaturan")
+        raw = st.text_input("Kode saham", value="BBCA", help="Contoh: BBCA, TLKM, ASII. "
+                                                               "Untuk saham luar negeri, matikan opsi di bawah (mis. AAPL).")
+        idx = st.checkbox("Saham BEI (tambah .JK otomatis)", value=True)
+        ticker = normalize_ticker(raw, idx)
+        group, default_peers = find_peers(ticker)
+        if group:
+            st.caption(f"Kelompok peer: **{group}**")
+        peers_raw = st.text_input("Saham pembanding (pisahkan koma)", value=", ".join(default_peers[:5]),
+                                  help="Kosongkan atau ubah sesuai keinginan.")
+        chart_period = st.radio("Periode grafik", ["6 bulan", "1 tahun", "3 tahun", "5 tahun"], index=1,
+                                horizontal=True)
+        run = st.button("Analisis", type="primary", width="stretch")
+        st.divider()
+        st.markdown("**Bobot skor total**  \nFundamental 35% · Valuasi 20% · Dividen 15% · Tren 30%  \n"
+                    "**BELI** ≥ 65 · **TAHAN** 45–64 · **JUAL** < 45")
+        st.divider()
+        st.toggle("🎓 Mode belajar", value=True, key="belajar",
+                  help="Tampilkan kolom penjelasan di sebelah angka dan catatan kaki istilah di setiap bagian.")
+        st.markdown("**📘 Cari arti istilah**")
+        istilah = st.selectbox("Istilah / singkatan", sorted(GLOSARIUM, key=str.lower), index=None,
+                               placeholder="Pilih, mis. PER atau RSI", label_visibility="collapsed")
+        if istilah:
+            st.info(tip(istilah))
+        st.caption("Arahkan kursor / ketuk ikon ⓘ di samping angka untuk penjelasan singkat.")
+
+    if not ticker:
+        st.info("Masukkan kode saham di panel kiri.")
+        return
+    if not run and "last_ticker" not in st.session_state:
+        st.info("Masukkan kode saham lalu klik **Analisis**.")
+        return
+    if run:
+        st.session_state["last_ticker"] = ticker
+        st.session_state["last_peers"] = peers_raw
+    ticker = st.session_state["last_ticker"]
+    peers_raw = st.session_state.get("last_peers", peers_raw)
+
+    with st.spinner(f"Mengambil data {ticker}…"):
+        a = analyze(ticker)
+    if a is None:
+        st.error(f"Data untuk **{ticker}** tidak ditemukan. Periksa kode saham atau koneksi internet.")
+        return
+
+    # ---------------- Header ----------------
+    c1, c2, c3, c4 = st.columns([2.2, 1, 1, 1.2])
+    with c1:
+        st.subheader(f"{a['name']} ({a['code']})")
+        st.caption(f"{a['sector']} · {a['industry']}")
+    c2.metric("Harga", fmt_price(a["price"], a["currency"]), fmt_pct(a["r1m"]) + " (1 bln)" if a["r1m"] is not None else None,
+              help=tip("Harga") + "\n\nAngka kecil di bawahnya = perubahan harga 1 bulan terakhir.")
+    c3.metric("Kapitalisasi pasar", fmt_big(a["market_cap"], a["currency"]), help=tip("Kapitalisasi pasar")
+              + "\n\nSingkatan: T = triliun, M = miliar, Jt = juta.")
+    color = RECO_COLOR[a["reco"]]
+    total_txt = "–" if a["total"] is None else f"{a['total']:.0f}/100"
+    c4.markdown(
+        f"<div style='background:{color};color:white;border-radius:12px;padding:12px 8px;text-align:center'>"
+        f"<div style='font-size:13px;opacity:.9'>Rekomendasi sistem</div>"
+        f"<div style='font-size:28px;font-weight:700;line-height:1.2'>{a['reco']}</div>"
+        f"<div style='font-size:13px'>Skor {total_txt}</div></div>", unsafe_allow_html=True,
+        help=tip("BELI / TAHAN / JUAL"))
+
+    st.markdown("#### Ringkasan")
+    st.markdown(summary_text(a))
+    k1, k2 = st.columns(2)
+    with k1:
+        st.markdown("**✅ Kekuatan**")
+        st.markdown("\n".join(f"- {p}" for p in a["pros"]) or "_Tidak ada yang menonjol._")
+    with k2:
+        st.markdown("**⚠️ Perhatian**")
+        st.markdown("\n".join(f"- {c}" for c in a["cons"]) or "_Tidak ada yang menonjol._")
+
+    s1, s2, s3, s4 = st.columns(4)
+    with s1:
+        score_badge("Fundamental", a["fund_score"], tip("Fundamental"))
+    with s2:
+        score_badge("Valuasi", a["val_score"], tip("Valuasi"))
+    with s3:
+        score_badge("Dividen", a["div_score"], tip("Dividen") + "\n\nSkor = 50% yield + 30% konsistensi + 20% payout ratio.")
+    with s4:
+        score_badge("Tren", a["trend_score"], "Arah pergerakan harga. Skor = 60% tren tahunan (return 1 th, posisi vs MA200, "
+                    "arah MA200) + 40% tren bulanan (return 1 bln, MA20 vs MA50, RSI).")
+    catatan_kaki(["ROE", "NPM", "PER", "PBV", "DER", "Dividend yield", "Payout ratio", "MA200", "RSI", "Momentum",
+                  "Jenuh beli / jenuh jual", "Uptrend / downtrend / sideways", "Skor", "BELI / TAHAN / JUAL"],
+                 "📘 Catatan kaki: arti singkatan di ringkasan")
+
+    tab_f, tab_d, tab_t, tab_p = st.tabs(["🏦 Fundamental", "💰 Dividen", "📊 Tren", "⚖️ Perbandingan"])
+
+    # ---------------- Fundamental ----------------
+    with tab_f:
+        if a["is_fin"]:
+            st.info("Saham sektor keuangan/bank: DER dan current ratio tidak dipakai dalam skor "
+                    "karena struktur neraca bank berbeda.")
+        rows = [
+            ("ROE (laba / ekuitas)", fmt_pct(a["roe"]), "≥ 15% bagus", a["f_scores"].get("ROE"), "ROE"),
+            ("ROA (laba / aset)", fmt_pct(a["roa"]), "bank ≥ 2%, non-bank ≥ 8%", a["f_scores"].get("ROA"), "ROA"),
+            ("NPM — margin laba bersih", fmt_pct(a["npm"]), "≥ 15% bagus", a["f_scores"].get("Margin laba bersih"), "NPM"),
+            ("Pertumbuhan pendapatan (YoY)", fmt_pct(a["rev_g"]), "≥ 10% bagus", a["f_scores"].get("Pertumbuhan pendapatan"),
+             "Pertumbuhan pendapatan"),
+            ("Pertumbuhan laba (YoY)", fmt_pct(a["eps_g"]), "≥ 10% bagus", a["f_scores"].get("Pertumbuhan laba"),
+             "Pertumbuhan laba"),
+            ("DER (utang / ekuitas)", "–" if a["der"] is None else f"{a['der'] / 100:.2f}x", "≤ 0,5x sehat",
+             a["f_scores"].get("Rasio utang (DER)"), "DER"),
+            ("Current ratio", fmt_num(a["cur"]), "≥ 1,5x sehat", a["f_scores"].get("Current ratio"), "Current ratio"),
+            ("PER", "–" if a["pe"] is None else f"{a['pe']:.1f}x", "< 12x murah, > 25x mahal", a["val_scores"]["PER"], "PER"),
+            ("PBV", "–" if a["pbv"] is None else f"{a['pbv']:.2f}x", "< 1,5x murah, > 4x mahal", a["val_scores"]["PBV"], "PBV"),
+            ("EPS (TTM)", fmt_num(a["eps"]), "positif = untung", None, "EPS"),
+        ]
+        df = pd.DataFrame(rows, columns=["Rasio", "Nilai", "Patokan umum", "Skor", "_key"])
+        df["Penilaian"] = df["Skor"].apply(penilaian)
+        if a["eps"] is not None:
+            df.loc[df["_key"] == "EPS", "Penilaian"] = "👍 untung" if a["eps"] > 0 else "👎 rugi"
+        if a["is_fin"]:
+            df.loc[df["_key"].isin(["DER", "Current ratio"]), "Penilaian"] = "— tidak dinilai (bank)"
+        df["Skor"] = df["Skor"].apply(lambda v: "–" if v is None or pd.isna(v) else f"{v:.0f}")
+        df["Artinya"] = df["_key"].apply(lambda k: GLOSARIUM[k]["arti"])
+        kolom = ["Rasio", "Nilai", "Penilaian", "Patokan umum", "Skor"]
+        if st.session_state.get("belajar", True):
+            kolom.append("Artinya")
+        st.dataframe(df[kolom], hide_index=True, width="stretch", column_config={
+            "Rasio": st.column_config.TextColumn(help="Nama rasio keuangan. Arti lengkapnya ada di kolom 'Artinya' dan catatan kaki."),
+            "Nilai": st.column_config.TextColumn(help="Angka terbaru dari Yahoo Finance. x = kali, % = persen."),
+            "Penilaian": st.column_config.TextColumn(help="👍 skor ≥ 70 · 😐 40–69 · 👎 < 40"),
+            "Patokan umum": st.column_config.TextColumn(help="Batas umum yang sering dipakai analis. Bandingkan juga dengan peer."),
+            "Skor": st.column_config.TextColumn(help="Nilai 0–100 untuk rasio ini. Skor Fundamental = rata-rata skor rasio fundamental."),
+            "Artinya": st.column_config.TextColumn(width="large", help="Penjelasan singkat untuk belajar."),
+        })
+        st.caption("Pertumbuhan YoY dari Yahoo Finance biasanya membandingkan kuartal terakhir dengan kuartal yang sama tahun lalu. "
+                   "Satuan: **x** = kali (mis. PER 10x = harga 10 kali laba per saham).")
+        catatan_kaki(["ROE", "ROA", "NPM", "Pertumbuhan pendapatan", "Pertumbuhan laba", "YoY", "DER", "Current ratio",
+                      "PER", "PBV", "EPS", "TTM", "Valuasi", "Peer"])
+
+    # ---------------- Dividen ----------------
+    with tab_d:
+        d1, d2, d3, d4 = st.columns(4)
+        d1.metric("Dividend yield (12 bln)", fmt_pct(a["div_yield"], 2), help=tip("Dividend yield"))
+        d2.metric("DPS — dividen per saham (12 bln)", fmt_price(a["div_ttm"], a["currency"]) if a["div_ttm"] else "–",
+                  help=tip("DPS"))
+        d3.metric("Payout ratio", fmt_pct(a["payout"], 0), help=tip("Payout ratio"))
+        d4.metric("Rutin dibagikan", f"{a['years_paid']}/5 tahun", help=tip("Konsistensi dividen"))
+        if a["div_cagr"] is not None:
+            st.caption(f"Pertumbuhan dividen per tahun (CAGR 3 tahun): **{fmt_pct(a['div_cagr'])}** "
+                       "— CAGR = rata-rata pertumbuhan majemuk per tahun.")
+        dby = a["div_by_year"]
+        if dby is not None and not dby.empty:
+            dby = dby[dby.index >= a["close"].index[-1].year - 9]
+            st.plotly_chart(bar_chart(dby, "Dividen per saham per tahun", pct=False), width="stretch")
+        else:
+            st.info("Tidak ada riwayat dividen.")
+        st.caption("Yield dihitung dari total dividen 12 bulan terakhir dibagi harga saat ini. "
+                   "Payout ideal 30–70%: cukup besar untuk pemegang saham, tetapi masih menyisakan laba untuk ekspansi.")
+        if a["div_yield"]:
+            st.info(f"💡 Contoh hitungan: memegang 1 lot (100 lembar) {a['code']} seharga "
+                    f"{fmt_price(a['price'] * 100, a['currency'])} memberi dividen ± "
+                    f"{fmt_price(a['div_ttm'] * 100, a['currency'])} setahun (sebelum pajak dividen).")
+        catatan_kaki(["Dividen", "Dividend yield", "DPS", "Payout ratio", "Konsistensi dividen", "CAGR", "TTM"])
+
+    # ---------------- Tren ----------------
+    with tab_t:
+        days = {"6 bulan": 182, "1 tahun": 365, "3 tahun": 1095, "5 tahun": 1825}[chart_period]
+        st.plotly_chart(price_chart(a, days), width="stretch")
+        st.caption("Setiap batang (candle) = 1 hari bursa. 🟩 hijau = harga naik hari itu, 🟥 merah = turun. "
+                   "Garis: **MA20** (biru, ± 1 bulan), **MA50** (ungu, ± 2,5 bulan), **MA200** (oranye, ± 1 tahun). "
+                   "Perbesar dengan menyeret area grafik; klik dua kali untuk kembali.")
+
+        with st.expander("🕯️ Cara membaca grafik candle (candlestick)", expanded=st.session_state.get("belajar", True)):
+            st.markdown(
+                "**1. Satu candle = ringkasan 4 harga dalam satu hari** — *Open* (pembukaan), *High* (tertinggi), "
+                "*Low* (terendah), *Close* (penutupan), disingkat **OHLC**.\n\n"
+                "- **Badan (body)** — kotak tebal, jarak antara Open dan Close.\n"
+                "- **Sumbu / ekor (shadow, wick)** — garis tipis di atas & bawah badan, menunjukkan High dan Low.\n"
+                "- **Warna** — 🟩 **hijau**: Close > Open (naik; Open di bawah, Close di atas). "
+                "🟥 **merah**: Close < Open (turun; Open di atas, Close di bawah).")
+            st.plotly_chart(candle_anatomy_chart(), width="stretch", config={"displayModeBar": False})
+            st.markdown(
+                "**2. Apa yang diceritakan bentuknya?**\n\n"
+                "- **Badan panjang** = satu pihak (pembeli atau penjual) dominan. **Badan pendek** = pertarungan seimbang.\n"
+                "- **Sumbu atas panjang** = harga sempat naik tapi ditolak (tekanan jual). "
+                "**Sumbu bawah panjang** = harga sempat turun tapi diangkat lagi (dukungan beli).\n"
+                "- Satu candle saja jarang cukup — lihat **beberapa candle berurutan** dan **posisinya terhadap tren**.")
+            st.markdown("**3. Pola candle yang sering ditemui**")
+            st.plotly_chart(candle_patterns_chart(), width="stretch", config={"displayModeBar": False})
+            st.markdown("\n".join(f"- **{nama}** — {arti}" for nama, _, arti in POLA_CANDLE))
+            st.markdown(
+                "**4. Membaca candle bersama garis MA**\n\n"
+                "- Candle-candle berada **di atas MA200** dan MA200 **menanjak** → tren besar naik (uptrend).\n"
+                "- Candle **menembus MA dari bawah ke atas** dengan badan hijau panjang → tanda penguatan; "
+                "menembus ke bawah dengan badan merah panjang → tanda pelemahan.\n"
+                "- Saat uptrend, harga sering **memantul di sekitar MA50/MA200** (area *support*). Hammer di area "
+                "support lebih bermakna daripada hammer di tengah-tengah.\n"
+                "- **MA20 di atas MA50** → momentum jangka pendek positif. MA50 memotong MA200 ke atas = *golden cross*, "
+                "ke bawah = *death cross*.\n\n"
+                "**5. Langkah praktis membaca grafik di atas**\n"
+                "1. Pilih periode **1–3 tahun** di panel kiri, lihat arah besar: candle mayoritas di atas atau di bawah MA200?\n"
+                "2. Pindah ke **6 bulan**: apakah puncak & lembah makin tinggi (uptrend) atau makin rendah (downtrend)?\n"
+                "3. Perhatikan **5–10 candle terakhir**: dominan hijau atau merah? Ada pola pembalikan (hammer, engulfing)?\n"
+                "4. Cocokkan dengan **RSI**: pola pembalikan naik + RSI ≤ 30 lebih kuat sinyalnya.\n\n"
+                "⚠️ Pola candle adalah *petunjuk peluang*, bukan kepastian. Selalu cocokkan dengan fundamental.")
+
+        bacaan = baca_candle_terakhir(a)
+        if bacaan:
+            st.markdown(f"#### 🔎 Bacaan otomatis candle terakhir {a['code']}")
+            st.markdown("\n".join(f"- {b}" for b in bacaan))
+
+        t1, t2 = st.columns(2)
+        with t1:
+            st.markdown(f"**Tren tahunan: {a['yearly_trend']}**")
+            st.markdown(
+                f"- Return 1 tahun: **{fmt_pct(a['r1y'])}** · 3 tahun: {fmt_pct(a['r3y'])} · YTD: {fmt_pct(a['ytd'])}\n"
+                f"- Harga {'di atas' if a['above200'] else 'di bawah'} MA200\n"
+                f"- Rentang 52 minggu: {fmt_price(a['lo52'], a['currency'])} – {fmt_price(a['hi52'], a['currency'])}"
+                + (f" (posisi {a['pos52'] * 100:.0f}% dari bawah)" if a["pos52"] is not None else ""))
+        with t2:
+            st.markdown(f"**Tren bulanan: {a['monthly_trend']}**")
+            st.markdown(
+                f"- Return 1 bulan: **{fmt_pct(a['r1m'])}** · 3 bulan: {fmt_pct(a['r3m'])} · 6 bulan: {fmt_pct(a['r6m'])}\n"
+                f"- MA20 {'di atas' if a['ma20_above_50'] else 'di bawah'} MA50 "
+                f"({'momentum positif' if a['ma20_above_50'] else 'momentum melemah'})\n"
+                f"- RSI(14): {fmt_num(a['rsi'], 0)} "
+                f"({'jenuh beli' if (a['rsi'] or 0) >= 70 else 'jenuh jual' if (a['rsi'] or 100) <= 30 else 'netral'})")
+        b1, b2 = st.columns(2)
+        if not a["annual_ret"].empty:
+            b1.plotly_chart(bar_chart(a["annual_ret"], "Return per tahun"), width="stretch")
+        if not a["monthly_ret"].empty:
+            b2.plotly_chart(bar_chart(a["monthly_ret"], "Return per bulan (12 bulan terakhir)"), width="stretch")
+        catatan_kaki(["Candle", "OHLC", "MA", "MA20", "MA50", "MA200", "Golden / death cross", "RSI",
+                      "Jenuh beli / jenuh jual", "Uptrend / downtrend / sideways", "Momentum", "Koreksi",
+                      "Support / resistance", "Return", "YTD", "Rentang 52 minggu"])
+
+    # ---------------- Perbandingan ----------------
+    with tab_p:
+        peer_list = [normalize_ticker(p, idx) for p in peers_raw.split(",") if p.strip()]
+        peer_list = [p for p in dict.fromkeys(peer_list) if p != ticker]
+        if not peer_list:
+            st.info("Isi daftar saham pembanding di panel kiri untuk melihat perbandingan.")
+        else:
+            results = [a]
+            prog = st.progress(0.0, text="Mengambil data pembanding…")
+            for i, p in enumerate(peer_list, 1):
+                r = analyze(p)
+                if r is not None:
+                    results.append(r)
+                prog.progress(i / len(peer_list), text=f"Mengambil data pembanding… ({i}/{len(peer_list)})")
+            prog.empty()
+
+            table = pd.DataFrame([{
+                "Saham": ("▶ " if r is a else "") + r["code"],
+                "Nama": r["name"],
+                "Harga": r["price"],
+                "PER": r["pe"],
+                "PBV": r["pbv"],
+                "ROE %": None if r["roe"] is None else r["roe"] * 100,
+                "Margin %": None if r["npm"] is None else r["npm"] * 100,
+                "Div. yield %": None if r["div_yield"] is None else r["div_yield"] * 100,
+                "Return 1 th %": None if r["r1y"] is None else r["r1y"] * 100,
+                "Fundamental": r["fund_score"],
+                "Valuasi": r["val_score"],
+                "Dividen": r["div_score"],
+                "Tren": r["trend_score"],
+                "Skor total": r["total"],
+                "Rekomendasi": r["reco"],
+            } for r in results]).sort_values("Skor total", ascending=False, na_position="last")
+
+            st.dataframe(
+                table, hide_index=True, width="stretch",
+                column_config={
+                    "Saham": st.column_config.TextColumn(help="▶ = saham yang sedang dianalisis."),
+                    "Harga": st.column_config.NumberColumn(format="%.0f", help=GLOSARIUM["Harga"]["arti"]),
+                    "PER": st.column_config.NumberColumn(format="%.1f", help=tip("PER")),
+                    "PBV": st.column_config.NumberColumn(format="%.2f", help=tip("PBV")),
+                    "ROE %": st.column_config.NumberColumn(format="%.1f", help=tip("ROE")),
+                    "Margin %": st.column_config.NumberColumn(format="%.1f", help=tip("NPM")),
+                    "Div. yield %": st.column_config.NumberColumn(format="%.2f", help=tip("Dividend yield")),
+                    "Return 1 th %": st.column_config.NumberColumn(format="%.1f", help=tip("Return")),
+                    "Fundamental": st.column_config.ProgressColumn(min_value=0, max_value=100, format="%.0f",
+                                                                   help=tip("Fundamental")),
+                    "Valuasi": st.column_config.ProgressColumn(min_value=0, max_value=100, format="%.0f",
+                                                               help=tip("Valuasi")),
+                    "Dividen": st.column_config.ProgressColumn(min_value=0, max_value=100, format="%.0f"),
+                    "Tren": st.column_config.ProgressColumn(min_value=0, max_value=100, format="%.0f"),
+                    "Skor total": st.column_config.ProgressColumn(min_value=0, max_value=100, format="%.0f",
+                                                                  help=tip("Skor")),
+                    "Rekomendasi": st.column_config.TextColumn(help=tip("BELI / TAHAN / JUAL")),
+                })
+            if st.session_state.get("belajar", True):
+                st.caption("💡 Cara membaca: urutkan tabel dengan klik judul kolom. Cari saham yang ROE-nya tinggi tetapi "
+                           "PER/PBV-nya rendah — artinya kualitas bagus dengan harga relatif murah dibanding peer-nya.")
+
+            # Saham yang lebih baik
+            better = [r for r in results if r is not a and r["total"] is not None and r["reco"] != "DATA KURANG"
+                      and a["total"] is not None and r["total"] > a["total"]]
+            better.sort(key=lambda r: r["total"], reverse=True)
+            st.markdown("#### Alternatif yang lebih baik")
+            if not better:
+                st.success(f"**{a['code']}** memiliki skor tertinggi di antara pembandingnya.")
+            else:
+                for r in better[:3]:
+                    reasons = []
+                    for key, label in [("fund_score", "fundamental"), ("val_score", "valuasi"),
+                                       ("div_score", "dividen"), ("trend_score", "tren")]:
+                        if r[key] is not None and a[key] is not None and r[key] - a[key] >= 10:
+                            reasons.append(f"{label} lebih baik ({r[key]:.0f} vs {a[key]:.0f})")
+                    st.markdown(f"- **{r['code']}** — skor {r['total']:.0f} ({r['reco']}): "
+                                + (", ".join(reasons) if reasons else "unggul tipis di beberapa aspek"))
+
+            # Juara per kategori
+            st.markdown("#### Terbaik per kategori")
+            cols = st.columns(4)
+            for col, (key, label) in zip(cols, [("fund_score", "Fundamental"), ("val_score", "Valuasi termurah"),
+                                                ("div_score", "Dividen"), ("trend_score", "Tren terkuat")]):
+                cands = [r for r in results if r[key] is not None]
+                if cands:
+                    best = max(cands, key=lambda r: r[key])
+                    col.metric(label, best["code"], f"skor {best[key]:.0f}", delta_color="off")
+
+            # Grafik kinerja relatif 1 tahun
+            fig = go.Figure()
+            for r in results:
+                c = r["close"][r["close"].index > r["close"].index[-1] - timedelta(days=365)]
+                if len(c) > 1:
+                    fig.add_trace(go.Scatter(x=c.index, y=(c / c.iloc[0] - 1) * 100, name=r["code"],
+                                             line=dict(width=3 if r is a else 1.5)))
+            fig.update_layout(title="Kinerja harga relatif 1 tahun (%)", height=380,
+                              margin=dict(l=10, r=10, t=40, b=10), yaxis_title="%")
+            st.plotly_chart(fig, width="stretch")
+            st.caption("Semua garis dimulai dari 0% setahun lalu. Garis tebal = saham yang dianalisis.")
+        catatan_kaki(["Peer", "PER", "PBV", "ROE", "NPM", "Dividend yield", "Return", "Kinerja relatif", "Skor",
+                      "BELI / TAHAN / JUAL"])
+
+    st.divider()
+    with st.expander("📘 Kamus lengkap istilah & singkatan"):
+        kamus = pd.DataFrame([{"Istilah": k, "Kepanjangan / nama": g["nama"], "Artinya": g["arti"], "Patokan": g["patokan"]}
+                              for k, g in sorted(GLOSARIUM.items(), key=lambda kv: kv[0].lower())])
+        st.dataframe(kamus, hide_index=True, width="stretch", height=500,
+                     column_config={"Artinya": st.column_config.TextColumn(width="large"),
+                                    "Patokan": st.column_config.TextColumn(width="medium")})
+    st.caption("⚠️ Rekomendasi dihasilkan otomatis dari aturan sederhana atas data publik dan bukan nasihat investasi. "
+               "Data Yahoo Finance untuk saham BEI kadang tidak lengkap atau terlambat diperbarui; cek ulang dengan "
+               "laporan keuangan resmi (idx.co.id) sebelum mengambil keputusan.")
 
 
 if __name__ == "__main__":
